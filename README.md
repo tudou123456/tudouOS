@@ -1,0 +1,81 @@
+# tudouOS 土豆OS
+
+面向 **ESP32-S3** 的自研嵌入式操作系统：自研土豆内核（C + Xtensa 汇编），
+研发检验全程跑在 QEMU（乐鑫官方分支，`-machine esp32s3`），由 Python
+QMP 测试台自动验收；同一份镜像可用 esptool 直接烧入真机开发板。
+
+> 当前阶段：**M1 最小闭环**——内核能在 QEMU 里经真实 ROM 引导启动，
+> 串口输出可断言的启动信息，测试台 4 个用例自动回归。
+> 路线图见 [docs/architecture.md](docs/architecture.md)。
+
+## 目录结构
+
+```
+kernel/          土豆内核（boot.S 启动、UART、mini printf、命令循环、看门狗）
+  linker/tudou.ld  链接脚本（全 RAM 运行，IRAM/DRAM 布局见注释）
+tools/           check_env.py 环境体检 / build.py 一键构建
+qemu/            run_qemu.py 交互/测试台/gdbstub 三种模式拉起 QEMU
+test/            QMP 测试台（runner + qmp_client + serial_tap + cases/）
+docs/            架构蓝图、路线图、QMP 测试台手册
+build/           构建产物（kernel.elf / potato_boot.bin / flash_image.bin）
+third_party/     本地工具链与 QEMU（不入库）
+```
+
+## 环境准备（一次性）
+
+```bash
+python tools/check_env.py      # 体检：交叉编译器 / esptool / QEMU
+python -m pip install esptool  # 缺 esptool 时
+```
+
+三件套的获取（check_env 缺什么会打印对应下载地址）：
+
+1. **交叉编译器** `xtensa-esp-elf-gcc`：乐鑫 crosstool-NG 发布包
+   （Windows x64 zip），解压到 `third_party/toolchain/` 任意子目录。
+2. **QEMU** `qemu-system-xtensa`：乐鑫 QEMU fork 的 Windows 包
+   （qemu-xtensa-softmmu-*-x86_64-w64-mingw32.tar.xz），解压到
+   `third_party/qemu/` 任意子目录。
+3. **esptool**：`pip install esptool`。
+
+也可用环境变量 `TUDOU_CC` / `TUDOU_QEMU` 直接指定可执行文件路径。
+若 QEMU 包不可用，WSL2 里跑 QEMU、Windows 跑测试台亦可（全走 TCP）。
+
+## 快速开始
+
+```bash
+python tools/build.py      # 编译内核 → ESP 镜像 → 4MB flash 镜像
+python qemu/run_qemu.py    # 交互运行（串口直连终端，可敲 ping/info/echo）
+python -m test.runner      # QMP 自动验收（4 个用例 + 日志落盘）
+```
+
+## 烧录真机（ESP32-S3 开发板）
+
+```bash
+esptool --chip esp32s3 --port COMx --baud 921600 \
+    write-flash 0x0 build/potato_boot.bin
+```
+
+（0x0 为 S3 二级引导偏移，构建结束也会打印。串口 115200-8N1。）
+
+## 测试用例（M1 验收）
+
+| 用例 | 验证 |
+| --- | --- |
+| test_boot_banner | ROM→内核完整启动链路、版本号、内存布局、READY 标记 |
+| test_ping_pong | 串口命令交互（ping→pong、echo、info） |
+| test_qmp_reset | QMP 复位后完整重启、RESET 事件、复位后功能正常 |
+| test_qmp_stop_cont | QMP 冻结 CPU 期间串口静默，恢复后补处理命令 |
+
+## 常见问题
+
+- **项目路径含中文导致构建报 `can't create xxx.o`**：工具链的 binutils
+  不支持非 ASCII 路径（本项目位于 `D:\公司软件\tudouOS`）。已建目录联接
+  `D:\tudouOS` → 本项目，构建时走联接路径即可：
+  `cmd /c "cd /d D:\tudouOS && python tools\build.py"`。
+  （QEMU 运行与测试台不受影响，两条路径都可用。）
+- **测试台/交互模式无任何输出**：多半是构建产物不存在或工具链缺失，
+  先 `python tools/check_env.py`。
+- **想看内核反汇编/调试**：`build/kernel.elf` 带符号，
+  `python qemu/run_qemu.py --gdb` + `xtensa-esp32s3-elf-gdb`。
+- **QMP 怎么单独玩**：交互模式已开 QMP 4444 端口，可自行发送 JSON，
+  例如 `{"execute":"system_reset"}`（需先 `qmp_capabilities`）。
