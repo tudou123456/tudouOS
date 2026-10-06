@@ -3,8 +3,12 @@
 #include <stdint.h>
 
 #include "console.h"
+#include "intc.h"
 #include "lib_shim.h"
 #include "potato.h"
+#include "tick.h"
+#include "time.h"
+#include "trace.h"
 #include "uart.h"
 
 /* ---------- mini printf ---------- */
@@ -117,13 +121,45 @@ void potato_printf(const char *fmt, ...)
 
 static void cmd_help(void)
 {
-    uart_puts("commands: help, ping, echo <text>, info\r\n");
+    uart_puts("commands: help, ping, echo <text>, info, tickstat, trace [n], crash\r\n");
 }
 
 static void cmd_info(void)
 {
     potato_printf("[POTATO] info: %s v%s kernel=%s target=%s\r\n",
                   POTATO_NAME, POTATO_VERSION, POTATO_KERNEL, POTATO_TARGET);
+}
+
+static void cmd_tickstat(void)
+{
+    potato_printf("[POTATO][TICK] ticks=%u cpu_hz=%u now_us=0x%x jit_min=%uus "
+                  "jit_max=%uus uart_irq=%u rx_bytes=%u\r\n",
+                  time_tick_count(), tick_cpu_hz(), time_now_us(),
+                  time_tick_jitter_min_us(), time_tick_jitter_max_us(),
+                  uart_rx_irq_count(), uart_rx_bytes());
+}
+
+static unsigned parse_dec(const char *s, unsigned fallback)
+{
+    unsigned v = 0;
+    int seen = 0;
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10u + (unsigned)(*s - '0');
+        s++;
+        seen = 1;
+    }
+    return seen ? v : fallback;
+}
+
+static void cmd_trace(const char *arg)
+{
+    trace_dump(parse_dec(arg, 16u));
+}
+
+static void cmd_crash(void)
+{
+    uart_puts("[POTATO] crashing on purpose (ill) ...\r\n");
+    asm volatile("ill"); /* 触发非法指令异常，走通用异常向量 */
 }
 
 static void cmd_dispatch(char *line)
@@ -157,6 +193,18 @@ static void cmd_dispatch(char *line)
     }
     if (strcmp(line, "info") == 0) {
         cmd_info();
+        return;
+    }
+    if (strcmp(line, "tickstat") == 0) {
+        cmd_tickstat();
+        return;
+    }
+    if (strcmp(line, "trace") == 0) {
+        cmd_trace(arg);
+        return;
+    }
+    if (strcmp(line, "crash") == 0) {
+        cmd_crash();
         return;
     }
     potato_printf("[POTATO] unknown command: %s (try 'help')\r\n", line);

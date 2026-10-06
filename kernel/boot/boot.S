@@ -36,6 +36,11 @@ _start:
     j       .Lclear_bss
 .Lbss_done:
 
+    /* 安装异常/中断向量表（链接脚本保证 .pot.vectors 0x400 对齐） */
+    movi    a2, pot_vectors
+    wsr.vecbase a2
+    esync
+
     movi    a0, 0
     call0   kernel_main
 

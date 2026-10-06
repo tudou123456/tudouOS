@@ -68,6 +68,24 @@ def test_my_feature(ctx):
    `ctx.qmp.command("human-monitor-command",
                    {"command-line": "info registers"})`。
 
+## 已知问题（乐鑫 QEMU Windows 构建 esp-develop-9.2.2-20260417）
+
+调试 M2 时实测撞到的坑，内核已按此适配（相应代码有注释）：
+
+| 现象 | 规避 |
+| --- | --- |
+| TIMG0/SYSTIMER 计数器一启用（写 T0_CONFIG 置 EN，与中断无关）QEMU 进程约 1s 内崩溃（0xC0000409） | M2 时钟方案改用核内 CCOMPARE0 tick + ccount 时基；TIMG/SYSTIMER 驱动保留（`POT_TIME_TIMG=1`）供真机/WSL Linux QEMU |
+| PS.INTLEVEL=15 期间置起设备中断源会使 QEMU 陷入活锁（monitor 都无响应） | 初始化顺序纪律：先开全局中断（INTENABLE 为空时安全）再逐级使能设备源 |
+| ccount 按翻译块大步推进，CCOMPARE 精确相等点被整段跳过（实测触发率 ~53%） | tick 处理按跨过的周期数补记，tick 计数与真实时间对齐（983Hz@1kHz 目标）；jitter 统计如实记录触发间隔 |
+| 通用异常（如非法指令）不回填 EPC1/EPS1/EXCVADDR（level-1 中断却会回填） | 异常现场打印保留字段，测试只断言 EXCCAUSE 与恢复语义；真机上字段有值 |
+| 高频轮询 MMIO（如标定循环锤 T0_UPDATE）不可取 | 时序热点避免 MMIO 轮询，用 ccount |
+
+另有两坑在构建侧（已固化进 build.py/链接脚本，详见代码注释）：
+- Xtensa `l32r` 字面量必须在指令之前且 4 字节对齐——链接脚本把 `.literal`
+  集中放 `.text` 之前，并全程 `-Wl,--no-relax`（开了 relax 会被重排成坏码）。
+- 统一工具链 C 文件用 `-mauto-litpools`；汇编文件不走长调用（内核尚小，
+  直跳 + 无字面量最稳）。
+
 ## 约定
 
 - 内核输出统一带 `[POTATO]` 前缀，作为断言锚点；新增模块请保持该约定。

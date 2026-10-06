@@ -82,9 +82,11 @@ def main():
     env = toolchain_env(cc)
     mcpu = probe_mcpu(cc, env)
 
-    base_flags = ["-mabi=call0", "-mlongcalls", "-mtext-section-literals"] + mcpu
+    base_flags = ["-mabi=call0", "-mlongcalls", "-mauto-litpools"] + mcpu
+    # 汇编不走 auto-litpools；内核尚小，直跳完全够用且避免 l32r 字面量错位问题
+    asm_flags = ["-mabi=call0"] + mcpu
     cflags = base_flags + [
-        "-O2", "-g", "-Wall", "-Wextra", "-std=c11",
+        "-O2", "-g", "-Wall", "-Wextra", "-std=gnu11",
         "-ffreestanding", "-fno-builtin", "-fno-stack-protector",
         "-ffunction-sections", "-fdata-sections",
         "-I", INCLUDE_DIR,
@@ -94,9 +96,13 @@ def main():
     print("[1/4] 编译内核 ...")
     objs = []
     for src in sorted(glob.glob(os.path.join(KERNEL_DIR, "kernel", "*.c")) +
-                      glob.glob(os.path.join(KERNEL_DIR, "boot", "*.S"))):
+                      glob.glob(os.path.join(KERNEL_DIR, "boot", "*.S")) +
+                      glob.glob(os.path.join(KERNEL_DIR, "intc", "*.c")) +
+                      glob.glob(os.path.join(KERNEL_DIR, "intc", "*.S")) +
+                      glob.glob(os.path.join(KERNEL_DIR, "time", "*.c")) +
+                      glob.glob(os.path.join(KERNEL_DIR, "trace", "*.c"))):
         obj = os.path.join(OBJDIR, os.path.splitext(os.path.basename(src))[0] + ".o")
-        subprocess.run([cc] + (cflags if src.endswith(".c") else base_flags) +
+        subprocess.run([cc] + (cflags if src.endswith(".c") else asm_flags) +
                        ["-c", src, "-o", obj], check=True, shell=False, env=env)
         print("   CC", os.path.basename(src))
         objs.append(obj)
@@ -106,6 +112,7 @@ def main():
     subprocess.run([cc, "-nostdlib", "-static",
                     "-T", LINKER_SCRIPT,
                     "-Wl,--gc-sections", "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
+                    "-Wl,--no-relax",
                     "-o", ELF] + objs, check=True, shell=False, env=env)
 
     # ---- 3. elf2image ----

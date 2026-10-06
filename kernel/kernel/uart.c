@@ -4,27 +4,74 @@
 #include "uart.h"
 
 /*
- * UART0 轮询驱动 — ESP32-S3
+ * UART0 驱动 — ESP32-S3（M2 起 RX 走中断）
  *   基址 0x60000000，寄存器偏移（esp-idf esp32s3/uart_reg.h）：
  *     FIFO    +0x00  写=发送字节 / 读=接收字节
- *     INT_CLR +0x10  写 1 清挂起中断
- *     STATUS  +0x1C  RXFIFO_CNT=bits[9:0]，TXFIFO_CNT=bits[25:16]
- *   波特率/引脚不做重配：ROM 引导时已把 UART0 配成 115200-8N1 并接到
- *   默认引脚（GPIO43/44），QEMU 的 UART 模型对波特率也不敏感。
+ *     INT_RAW +0x04  INT_ST +0x08  INT_ENA +0x0C  INT_CLR +0x10
+ *     CLKDIV  +0x14  STATUS +0x1C（RXFIFO_CNT=[9:0]，TXFIFO_CNT=[25:16]）
+ *     CONF1   +0x24（RXFIFO_FULL_THRHD=[9:0]）
+ *   波特率/引脚不做重配：ROM 引导时已把 UART0 配成 115200-8N1。
+ * TX 保持轮询（M2 无调度器，轮询最简单可靠）；RX 由 rxfifo_full 中断
+ * （阈值 1 字节）搬入环形缓冲，控制台从缓冲取数 —— 事件驱动打样。
  */
 
 #define UART0_BASE   0x60000000u
 #define UART_FIFO    (UART0_BASE + 0x00u)
+#define UART_INT_RAW (UART0_BASE + 0x04u)
+#define UART_INT_ST  (UART0_BASE + 0x08u)
+#define UART_INT_ENA (UART0_BASE + 0x0Cu)
 #define UART_INT_CLR (UART0_BASE + 0x10u)
 #define UART_STATUS  (UART0_BASE + 0x1Cu)
+#define UART_CONF1   (UART0_BASE + 0x24u)
 
 #define ST_RXFIFO_CNT(st) (((st) >> 0) & 0x3FFu)
 #define ST_TXFIFO_CNT(st) (((st) >> 16) & 0x3FFu)
 
+#define UART_RXFIFO_FULL_INT (1u << 0)
+
+/* RX 环形缓冲：长度必须是 2 的幂 */
+#define RX_RING_LEN 128u
+static volatile char g_rx_ring[RX_RING_LEN];
+static volatile uint16_t g_rx_head;
+static volatile uint16_t g_rx_tail;
+static volatile uint32_t g_rx_irq_count;
+static volatile uint32_t g_rx_bytes;
+
 void uart_init(void)
 {
-    /* 清掉 ROM 阶段可能挂起的 UART 中断标志（M1 用轮询，不开中断源） */
+    /* 清掉 ROM 阶段可能挂起的 UART 中断标志（此时尚未开 RX 中断源） */
     mmio_write(UART_INT_CLR, 0xFFFFFFFFu);
+}
+
+void uart_irq_init(void)
+{
+    g_rx_head = 0;
+    g_rx_tail = 0;
+    g_rx_irq_count = 0;
+    g_rx_bytes = 0;
+
+    /* RX FIFO 达 1 字节即触发 rxfifo_full 中断 */
+    mmio_write(UART_CONF1, 1u & 0x3FFu);
+    mmio_write(UART_INT_CLR, 0xFFFFFFFFu);
+    mmio_write(UART_INT_ENA, UART_RXFIFO_FULL_INT);
+}
+
+/* intc.c 在 level2 调用 */
+void uart0_irq_handler(void)
+{
+    if ((mmio_read(UART_INT_ST) & UART_RXFIFO_FULL_INT) != 0u) {
+        g_rx_irq_count++;
+        while (ST_RXFIFO_CNT(mmio_read(UART_STATUS)) != 0u) {
+            char c = (char)(mmio_read(UART_FIFO) & 0xFFu);
+            uint16_t next = (uint16_t)((g_rx_head + 1) & (RX_RING_LEN - 1u));
+            if (next != g_rx_tail) { /* 满则丢字节（128B 对控制台足够） */
+                g_rx_ring[g_rx_head] = c;
+                g_rx_head = next;
+                g_rx_bytes++;
+            }
+        }
+        mmio_write(UART_INT_CLR, UART_RXFIFO_FULL_INT);
+    }
 }
 
 void uart_putc(char c)
@@ -32,9 +79,15 @@ void uart_putc(char c)
     if (c == '\n') {
         uart_putc('\r');
     }
-    /* 等 TX FIFO 排空再写，轮询实现里最稳妥（对 FIFO 深度不敏感） */
+    /* 等 TX FIFO 排空再写，对 FIFO 深度不敏感 */
     while (ST_TXFIFO_CNT(mmio_read(UART_STATUS)) != 0u) {
     }
+    mmio_write(UART_FIFO, (uint32_t)(uint8_t)c);
+}
+
+/* 诊断探针：直接写 FIFO 一个字符，不查状态（vectors.S 用） */
+void uart_mark(char c)
+{
     mmio_write(UART_FIFO, (uint32_t)(uint8_t)c);
 }
 
@@ -47,9 +100,20 @@ void uart_puts(const char *s)
 
 int uart_getc(void)
 {
-    uint32_t st = mmio_read(UART_STATUS);
-    if (ST_RXFIFO_CNT(st) == 0u) {
-        return -1;
+    if (g_rx_head != g_rx_tail) {
+        char c = g_rx_ring[g_rx_tail];
+        g_rx_tail = (uint16_t)((g_rx_tail + 1) & (RX_RING_LEN - 1u));
+        return (int)(unsigned char)c;
     }
-    return (int)(mmio_read(UART_FIFO) & 0xFFu);
+    return -1;
+}
+
+uint32_t uart_rx_irq_count(void)
+{
+    return g_rx_irq_count;
+}
+
+uint32_t uart_rx_bytes(void)
+{
+    return g_rx_bytes;
 }

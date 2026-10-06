@@ -21,11 +21,27 @@ MEMORY
 
 SECTIONS
 {
+    /* 向量表必须在最前且 0x400 对齐（boot.S 把 VECBASE 指向 pot_vectors） */
+    .pot_vectors : ALIGN(0x400)
+    {
+        pot_vectors = .;
+        KEEP(*(.pot.vectors))
+        . = ALIGN(0x400); /* 表长固定 0x400 */
+    } > iram
+
+    /* 所有字面量集中放在 .text 之前：l32r 只能向后（低地址）取字面量，
+       且必须 4 字节对齐（配合 --no-relax，杜绝错位/前向引用） */
+    .literal : ALIGN(4)
+    {
+        *(.literal .literal.*)
+        . = ALIGN(4);
+    } > iram
+
     .text : ALIGN(4)
     {
         _text_start = .;
         KEEP(*(.text.start))          /* boot.S 的 _start 必须在最前 */
-        *(.text .text.* .literal .literal.* .rodata .rodata.*)
+        *(.text .text.* .rodata .rodata.*)
         . = ALIGN(4);
         _text_end = .;
     } > iram
