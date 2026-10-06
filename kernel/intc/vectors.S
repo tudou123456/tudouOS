@@ -74,9 +74,11 @@ pot_vectors:
 
     .text
 
-/* call0 现场保存：a0-a15 → 0..56，SAR/LBEG/LEND/LCOUNT → 60..72 */
+/* 通用异常现场保存：帧 88 字节，与 switch.S 任务帧布局一致（含 epc1/eps1，
+ * M3 抢占切换会把它整体当作 IRQ 帧记账到被抢占任务）：
+ *   0..56 a0,a2..a15   60..72 sar/lbeg/lend/lcount   76 epc1   80 eps1 */
     .macro SAVE_CALL0_REGS
-    addi    a1, a1, -80
+    addi    a1, a1, -88
     s32i    a0, a1, 0
     s32i    a2, a1, 4
     s32i    a3, a1, 8
@@ -100,6 +102,10 @@ pot_vectors:
     s32i    a2, a1, 68
     rsr.lcount  a2
     s32i    a2, a1, 72
+    rsr.epc1    a2
+    s32i    a2, a1, 76
+    rsr     a2, 194               /* EPS1：核心配置未导出名字，用标准 SR 编号 */
+    s32i    a2, a1, 80
     .endm
 
     .macro RESTORE_CALL0_REGS
@@ -126,7 +132,7 @@ pot_vectors:
     l32i    a3, a1, 8
     l32i    a2, a1, 4
     l32i    a0, a1, 0
-    addi    a1, a1, 80
+    addi    a1, a1, 88
     .endm
 
 /*
@@ -151,6 +157,7 @@ pot_irq_level\level:
 pot_genex_entry:
     SAVE_CALL0_REGS
     movi    a2, 0
+    mov     a3, a1                  /* 帧基址传给 C（抢占切换用） */
     call0   exception_dispatch
     bnez    a2, .Lgenex_resume
 1:

@@ -2,6 +2,8 @@
 
 #include "console.h"
 #include "intc.h"
+#include "task.h"
+#include "tick.h"
 #include "time.h"
 #include "trace.h"
 #include "uart.h"
@@ -23,6 +25,7 @@ void kernel_main(void)
     intc_init();
     time_source_init();
     tick_init();
+    pot_sched_init(); /* M3：调度器（main 即控制台任务，idle 兜底） */
     uart_irq_init();
 
     potato_printf("\r\n[POTATO] %s v%s (%s kernel) on %s\r\n",

@@ -4,14 +4,16 @@
 #include "exception.h"
 #include "intc.h"
 #include "potato.h"
+#include "task.h"
 #include "tick.h"
 #include "time.h"
 #include "trace.h"
 
 /*
- * 异常处理（M2）：
- *  - EXCCAUSE=4（LEVEL1_INTERRUPT）：核内 level-1 中断（CCOMPARE0 tick），
- *    分发处理后返回 1，由 vectors.S 恢复现场 RFE。
+ * 异常处理（M3）：
+ *  - EXCCAUSE=4（LEVEL1_INTERRUPT）：tick/核内中断 → 分发 + 调度记账，
+ *    若需抢占则把当前异常帧转为被抢占任务的 IRQ 帧并切换（不返回）。
+ *  - EXCCAUSE=1（SYSCALL）：任务级恢复 IRQ 帧任务的跳板落地。
  *  - 其余：致命，打印现场 + 追踪环摘要后挂起（QMP 复位/GDB 恢复）。
  */
 
@@ -65,12 +67,21 @@ static void halt_forever(void)
     }
 }
 
-unsigned exception_dispatch(unsigned vec_flag)
+unsigned exception_dispatch(unsigned vec_flag, void *frame_base)
 {
     uint32_t cause = sr_exccause();
 
-    if (vec_flag == 0u && cause == 4u) {
-        return intc_l1_dispatch() != 0u ? 1u : 0u;
+    if (vec_flag == 0u) {
+        if (cause == 4u) { /* level-1 中断（tick）：记账+唤醒，不在中断上下文切换 */
+            intc_l1_dispatch();
+            return 1;
+        }
+        if (cause == 1u) { /* syscall：任务级切换（yield/sleep/exit/检查点） */
+            if (pot_sched_try_syscall(frame_base)) {
+                /* 不可达：切换在异常上下文完成 */
+            }
+            /* 非调度 syscall（M3 无其它用途）→ 落入致命路径 */
+        }
     }
 
     uint32_t epc = sr_epc1();
@@ -83,8 +94,8 @@ unsigned exception_dispatch(unsigned vec_flag)
                   vec_flag != 0u ? "DOUBLE_EXCEPTION" : "EXCEPTION");
     potato_printf("[POTATO][EXC] cause=%u(%s) epc=0x%x vaddr=0x%x ps=0x%x\r\n",
                   cause, cause_name(cause), epc, vaddr, ps);
-    potato_printf("[POTATO][EXC] ticks=%u trace_dropped=%u\r\n",
-                  time_tick_count(), trace_dropped());
+    potato_printf("[POTATO][EXC] task=%s ticks=%u trace_dropped=%u\r\n",
+                  pot_current->name, time_tick_count(), trace_dropped());
     potato_printf("[POTATO][EXC] HALTED (QMP system_reset 可复位重启)\r\n");
 
     halt_forever();

@@ -4,9 +4,10 @@
 研发检验全程跑在 QEMU（乐鑫官方分支，`-machine esp32s3`），由 Python
 QMP 测试台自动验收；同一份镜像可用 esptool 直接烧入真机开发板。
 
-> 当前阶段：**M2 已完成**——中断/异常/1kHz tick + 最小追踪环落地，
-> 测试台 9 用例（M1×4 + M2×5）全绿。产品定位与四大核心支柱（内核原生
-> MCP 消息总线 / 仿真硬件双端同源 / 内核可观测 / AI 交互低抖动调度）见
+> 当前阶段：**M3 已完成**——RTOS 核心落地（任务/上下文切换/三分类抢占
+> 调度：AI通信/UI/后台 + 老化防饿死 + 后台预算限速），测试台 **14 用例
+> 全绿**（M1×4 + M2×5 + M3×5）。产品定位与四大核心支柱（内核原生 MCP
+> 消息总线 / 仿真硬件双端同源 / 内核可观测 / AI 交互低抖动调度）见
 > [docs/architecture.md](docs/architecture.md)，MCP 消息基座设计见
 > [docs/mcp-bus-design.md](docs/mcp-bus-design.md)。
 
@@ -59,7 +60,7 @@ esptool --chip esp32s3 --port COMx --baud 921600 \
 
 （0x0 为 S3 二级引导偏移，构建结束也会打印。串口 115200-8N1。）
 
-## 测试用例（M1+M2 验收，9 个全绿）
+## 测试用例（M1+M2+M3 验收，14 个全绿）
 
 | 用例 | 验证 |
 | --- | --- |
@@ -72,6 +73,15 @@ esptool --chip esp32s3 --port COMx --baud 921600 \
 | test_exception_dump | 非法指令异常现场 dump，QMP 复位后完整恢复 |
 | test_trace_dump | 追踪环事件序号递增、时间戳单调 |
 | test_irq_latency_smoke | tick 触发间隔有界冒烟（硬预算以真机为准） |
+| test_sched_checkpoint_preempt | 后台忙烧被 UI 睡醒任务在检查点抢占（心跳交织证据） |
+| test_three_class_stress | 三分类严格优先级 + 老化防饿死（AI 先完成、UI/后台保底推进） |
+| test_bg_budget | 后台预算限速（1000tick 窗口 ≤700tick） |
+| test_sleep_cadence | 任务睡眠节拍（宿主时钟容差断言） |
+| test_sched_trace | 追踪环含 SCHED_SWITCH 事件（调度可回放） |
+
+**调度观测命令**：`tasks`（各任务状态/CPU 占用/切换数/诊断计数）、
+`taskdemo preempt|stress|bg|off`（调度演示与压测）、`sleep <ms>`、
+`flood <n>`（串口压测）。
 
 ## 常见问题
 

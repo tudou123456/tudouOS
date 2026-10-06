@@ -84,7 +84,7 @@ def main():
 
     base_flags = ["-mabi=call0", "-mlongcalls", "-mauto-litpools"] + mcpu
     # 汇编不走 auto-litpools；内核尚小，直跳完全够用且避免 l32r 字面量错位问题
-    asm_flags = ["-mabi=call0"] + mcpu
+    asm_flags = ["-mabi=call0", "-I", INCLUDE_DIR] + mcpu
     cflags = base_flags + [
         "-O2", "-g", "-Wall", "-Wextra", "-std=gnu11",
         "-ffreestanding", "-fno-builtin", "-fno-stack-protector",
@@ -100,7 +100,9 @@ def main():
                       glob.glob(os.path.join(KERNEL_DIR, "intc", "*.c")) +
                       glob.glob(os.path.join(KERNEL_DIR, "intc", "*.S")) +
                       glob.glob(os.path.join(KERNEL_DIR, "time", "*.c")) +
-                      glob.glob(os.path.join(KERNEL_DIR, "trace", "*.c"))):
+                      glob.glob(os.path.join(KERNEL_DIR, "trace", "*.c")) +
+                      glob.glob(os.path.join(KERNEL_DIR, "sched", "*.c")) +
+                      glob.glob(os.path.join(KERNEL_DIR, "sched", "*.S"))):
         obj = os.path.join(OBJDIR, os.path.splitext(os.path.basename(src))[0] + ".o")
         subprocess.run([cc] + (cflags if src.endswith(".c") else asm_flags) +
                        ["-c", src, "-o", obj], check=True, shell=False, env=env)

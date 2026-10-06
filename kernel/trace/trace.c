@@ -30,8 +30,9 @@ void trace_init(void)
 
 void trace_push(uint16_t type, uint32_t a, uint32_t b)
 {
-    uint32_t ps = irq_save();
-
+    /* v3 检查点调度：所有写入方都在异常上下文（EXCM=1 天然互斥，单异常
+       串行），无需关中断——绝不能在热路径持有 INTLEVEL=15（挂起 tick 会
+       触发 QEMU 活锁，M2 已知问题；切换风暴下必然中奖） */
     uint16_t h = g_head;
     g_ring[h].t = time_ticks_raw();
     g_ring[h].a = a;
@@ -40,8 +41,6 @@ void trace_push(uint16_t type, uint32_t a, uint32_t b)
     g_ring[h].seq = g_seq;
     g_seq++;
     g_head = (uint16_t)((h + 1) & (POT_TRACE_CAPACITY - 1));
-
-    irq_restore(ps);
 }
 
 uint32_t trace_dropped(void)
@@ -53,17 +52,18 @@ uint32_t trace_dropped(void)
 static const char *event_name(uint16_t type)
 {
     switch (type) {
-    case TR_IRQ_ENTER: return "IRQ_ENTER";
-    case TR_IRQ_EXIT:  return "IRQ_EXIT";
-    case TR_EXCEPTION: return "EXCEPTION";
-    default:           return "?";
+    case TR_IRQ_ENTER:    return "IRQ_ENTER";
+    case TR_IRQ_EXIT:     return "IRQ_EXIT";
+    case TR_EXCEPTION:    return "EXCEPTION";
+    case TR_SCHED_SWITCH: return "SCHED_SWITCH";
+    default:              return "?";
     }
 }
 
 void trace_dump(unsigned max_n)
 {
-    uint32_t ps = irq_save();
-
+    /* 无锁 dump：与 tick 写入方可能轻微撕裂（罕见、仅为可读性损失）；
+       同样禁止在这里持有 INTLEVEL=15 */
     uint32_t total = g_seq;
     unsigned n = (total < max_n) ? total : max_n;
     if (n > POT_TRACE_CAPACITY) {
@@ -79,6 +79,4 @@ void trace_dump(unsigned max_n)
                       event_name(g_ring[idx].type),
                       g_ring[idx].a, g_ring[idx].b);
     }
-
-    irq_restore(ps);
 }

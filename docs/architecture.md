@@ -118,7 +118,7 @@ tudouOS 的差异化调度：
 | --- | --- | --- | --- |
 | M1 ✅ | 启动 + UART 控制台 + 测试台闭环 | 支柱2雏形 | 横幅/ping-pong/QMP 复位/停止恢复 4/4 通过 |
 | M2 ✅ | 中断与异常：VECBASE 向量表、UART RX 中断（level2 向量路径）、1kHz tick（核内 CCOMPARE0，level1 通用异常路径+RFE）、致命异常现场 dump、最小追踪环（IRQ/EXC 事件）。时钟双路线：QEMU Windows 用 ccount（TIMG 计数器在该构建上启用即崩，见 qemu-testing.md 已知问题），真机/WSL 可切 TIMG | 强化1（根基）、支柱3起步 | M1 4 用例 + tick 存活/RX 中断不丢/异常 dump+复位恢复/追踪 dump/抖动冒烟 共 9/9 |
-| M3 | RTOS 核心：任务/上下文切换/**三分类抢占调度**（AI通信/UI/后台 + 老化防饥饿） | 支柱4、强化1 | 切换波形断言、三分类抖动数据、优先级抢占时序、双端一致性事件序 diff |
+| M3 ✅ | RTOS 核心：任务模型（静态栈 TCB 注册表）、syscall 统一上下文切换（call0，88 字节帧）、**三分类抢占调度**（AI通信/UI/后台 + 轮转 + 5tick 时间片 + 200ms 老化防饿死【同优先级老化者优先决胜】+ 后台 1000tick 窗口 700tick 预算限速）、任务 sleep/yield/exit、idle 空闲任务、SCHED_SWITCH 追踪事件、taskstat/taskdemo 观测命令。tick 为检查点轮询驱动（该 QEMU 限制，见 qemu-testing 已知问题），真机阶段恢复中断驱动抢占 | 支柱4、强化1 | M1 4 + M2 5 + M3 5 共 **14/14**：检查点抢占交织/三分类老化防饿死/后台预算/睡眠节拍/调度追踪 |
 | M3.5 | **内核消息基座**：有界通道、消息ID/回执/超时/QoS/丢弃重发策略、追踪埋点 | 支柱1、强化2 | 洪泛压测、超时重发、断线自愈（QMP 复位模拟）、队列防溢出 |
 | M4 | 轻量内存管理：TLSF 类分配器、护栏（canary/水位/碎片度量）、alloc 追踪埋点 | 强化4、支柱3 | 反复分配释放回归、越界捕获、48h 挂机 soak（QEMU 批量复位+压测） |
 | M5 | 自研 bootloader + flash XIP、驱动框架、GPIO/SPI/I2C、**PAL 层成形** | 支柱2、强化3 | 大内核 XIP 双端启动一致性、驱动单测框架 |

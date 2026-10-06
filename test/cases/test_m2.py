@@ -60,15 +60,15 @@ def test_exception_dump(ctx):
 
 
 def test_trace_dump(ctx):
-    """追踪环：事件序号递增、时间戳单调不减。"""
+    """追踪环：事件序号递增、时间戳单调不减（M3 起含 SCHED_SWITCH 事件）。"""
     ctx.serial.expect(READY_LINE, timeout=20)
-    time.sleep(0.3)  # 让 tick 事件积累
+    time.sleep(0.3)  # 让事件积累
     ctx.serial.send("trace 8")
     ctx.serial.expect(r"\[POTATO\]\[TR\] total=\d+ dropped=\d+ last 8:", timeout=5)
     ts, seqs = [], []
     for _ in range(8):
         m = ctx.serial.expect(
-            r"\[POTATO\]\[TR\] #(\d+) t=(\d+) (IRQ_ENTER|IRQ_EXIT|EXCEPTION)", timeout=3)
+            r"\[POTATO\]\[TR\] #(\d+) t=(\d+) (IRQ_ENTER|IRQ_EXIT|EXCEPTION|SCHED_SWITCH)", timeout=3)
         seqs.append(int(m.group(1)))
         ts.append(int(m.group(2)))
     assert all(a <= b for a, b in zip(seqs, seqs[1:])), f"序号非递增: {seqs}"
@@ -76,9 +76,11 @@ def test_trace_dump(ctx):
 
 
 def test_irq_latency_smoke(ctx):
-    """抖动冒烟（QEMU 版）：只断言有界（<10ms）防退化；硬预算以真机为准。"""
+    """抖动冒烟（QEMU 轮询制）：只断言有界（<120ms）防退化。
+    v4 tick 为检查点轮询驱动，触发间隔含任务忙烧段（数十 ms 级），
+    硬性抖动预算以真机中断驱动阶段为准。"""
     ctx.serial.expect(READY_LINE, timeout=20)
     time.sleep(1.0)
     m = _tickstat(ctx)
     jit_max = int(m.group(5))
-    assert jit_max < 10000, f"tick 触发最大间隔 {jit_max}us 超过 10ms 冒烟上限"
+    assert jit_max < 120000, f"tick 触发最大间隔 {jit_max}us 超过 120ms 冒烟上限"

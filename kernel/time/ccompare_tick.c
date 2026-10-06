@@ -23,6 +23,7 @@
 #define CC_PER_US        (POT_CPU_HZ / 1000000u)     /* 40 */
 
 static volatile uint32_t g_ticks;
+static volatile uint32_t g_last_elapsed;
 static volatile uint32_t g_jit_min = 0xFFFFFFFFu;
 static volatile uint32_t g_jit_max;
 static uint32_t g_next_cc;
@@ -69,13 +70,54 @@ void tick_init(void)
 {
     g_last_fire_cc = ccount();
     g_next_cc = g_last_fire_cc + TICK_PERIOD_CC;
-    set_ccompare0(g_next_cc);
-    intc_enable_int(CCOMPARE0_INT); /* int6 (level-1) 此刻起投递 */
+    /* v4：不使能 int6——调度核心去中断化（该 QEMU 的异常×手动退出
+       交互存在不可修复的竞态），tick 由 pot_tick_poll() 在任务检查点
+       与空闲循环内联处理；真机阶段再恢复中断驱动。 */
+}
+
+/* 轮询推进 tick：到点则补记并驱动调度器记账/唤醒。
+ * 在任务级上下文调用（yield/sleep 入口、空闲循环）。 */
+void pot_tick_poll(void)
+{
+    uint32_t now = ccount();
+    while ((int32_t)(now - g_next_cc) >= 0) {
+        uint32_t elapsed = (now - (g_next_cc - TICK_PERIOD_CC)) / TICK_PERIOD_CC;
+        if (elapsed == 0u) {
+            elapsed = 1u;
+        }
+        g_ticks += elapsed;
+        g_last_elapsed = elapsed;
+
+        g_next_cc += elapsed * TICK_PERIOD_CC;
+        if ((int32_t)(g_next_cc - now) < 0) {
+            g_next_cc = now + TICK_PERIOD_CC;
+        }
+
+        /* 触发间隔统计（真实观测） */
+        uint32_t delta_us = (now - g_last_fire_cc) / CC_PER_US;
+        g_last_fire_cc = now;
+        if (g_ticks > 2u) {
+            if (delta_us < g_jit_min) {
+                g_jit_min = delta_us;
+            }
+            if (delta_us > g_jit_max) {
+                g_jit_max = delta_us;
+            }
+        }
+
+        extern void pot_sched_tick(uint32_t);
+        pot_sched_tick(elapsed);
+    }
 }
 
 uint32_t tick_cpu_hz(void)
 {
     return POT_CPU_HZ;
+}
+
+uint32_t tick_last_elapsed(void)
+{
+    return g_last_elapsed;
 }
 
 uint32_t time_tick_count(void)
@@ -105,6 +147,7 @@ void tick_irq_handler(void)
         elapsed = 1u;
     }
     g_ticks += elapsed;
+    g_last_elapsed = elapsed;
 
     g_next_cc += elapsed * TICK_PERIOD_CC;
     if ((int32_t)(g_next_cc - now) < 0) {

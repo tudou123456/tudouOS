@@ -2,6 +2,7 @@
 
 #include "intc.h"
 #include "io.h"
+#include "task.h"
 #include "tick.h"
 #include "trace.h"
 #include "uart.h"
@@ -54,12 +55,13 @@ void intc_irq_dispatch(unsigned level)
 }
 
 /* 通用异常路径的 level-1 中断分发；返回 1=已处理可恢复，0=意外源（致命）。
- * M2 使能的唯一 level-1 源是 int6(CCOMPARE0)；该核心无 INTSET SR，
+ * M3 使能的唯一 level-1 源是 int6(CCOMPARE0)；该核心无 INTSET SR，
  * 无法枚举挂起源，若未来启用多个 l1 源需改用 ERI INTSTAT。 */
 unsigned intc_l1_dispatch(void)
 {
     trace_push(TR_IRQ_ENTER, 1, 6);
     tick_irq_handler(); /* 重挂 CCOMPARE0 的写操作顺带清除挂起 */
+    pot_sched_tick(tick_last_elapsed()); /* 调度器记账/唤醒/抢占决策 */
     trace_push(TR_IRQ_EXIT, 1, 6);
     return 1;
 }

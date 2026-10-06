@@ -18,10 +18,12 @@ class SerialTap:
         self.host = host
         self.port = port
         self.text = ""
+        self.ts_lines = []  # [(monotonic_ts, line)] 行时间戳（时序断言用）
         self._pos = 0
         self._cv = threading.Condition()
         self._sock = None
         self._thread = None
+        self._line_buf = ""
 
     def connect(self, wait_secs=20.0):
         deadline = time.monotonic() + wait_secs
@@ -49,9 +51,25 @@ class SerialTap:
                 break
             if not data:
                 break
+            now = time.monotonic()
             with self._cv:
-                self.text += data.decode("utf-8", errors="replace")
+                chunk = data.decode("utf-8", errors="replace")
+                self.text += chunk
+                self._line_buf += chunk
+                while "\n" in self._line_buf:
+                    line, self._line_buf = self._line_buf.split("\n", 1)
+                    self.ts_lines.append((now, line.rstrip("\r")))
                 self._cv.notify_all()
+
+    def ts_of(self, pattern, last_n=200):
+        """返回最近匹配行的 (时间戳, match)，找不到返回 None"""
+        import re
+        rx = re.compile(pattern)
+        for ts, line in reversed(self.ts_lines[-last_n:]):
+            m = rx.search(line)
+            if m is not None:
+                return (ts, m)
+        return None
 
     def expect(self, pattern, timeout=10.0):
         """等待正则出现并返回 Match；超时抛 SerialTimeoutError（附最近输出）。"""
