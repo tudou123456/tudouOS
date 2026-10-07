@@ -56,6 +56,11 @@ static const char *event_name(uint16_t type)
     case TR_IRQ_EXIT:     return "IRQ_EXIT";
     case TR_EXCEPTION:    return "EXCEPTION";
     case TR_SCHED_SWITCH: return "SCHED_SWITCH";
+    case TR_MSG_ENQ:      return "MSG_ENQ";
+    case TR_MSG_DEQ:      return "MSG_DEQ";
+    case TR_MSG_DROP:     return "MSG_DROP";
+    case TR_MSG_RETRY:    return "MSG_RETRY";
+    case TR_MSG_ACK:      return "MSG_ACK";
     default:              return "?";
     }
 }

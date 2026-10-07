@@ -52,24 +52,35 @@ def test_three_class_stress(ctx):
     a = sum(1 for l in lines if re.search(r"\[D\] A \d+\s*$", l))
     u = sum(1 for l in lines if re.search(r"\[D\] U \d+\s*$", l))
     g = sum(1 for l in lines if re.search(r"\[D\] G \d+\s*$", l))
-    assert a >= 120, f"AI 拍数 {a}（最高优先级应先跑完）"
+    assert a >= 200, f"AI 拍数 {a}（最高优先级应先跑完）"
     assert u >= 1, "UI 在 AI 忙烧下零运行（老化失效）"
     assert g >= 1, "后台零运行（老化失效）"
     ctx.serial.send("taskdemo off")
 
 
 def test_bg_budget(ctx):
-    """后台预算限速：仅后台忙烧时不超预算（≤85% 容差），且能跑完。"""
+    """后台预算限速：窗口（1000 tick）滚动后后台占用 ≤ 预算+容差。
+    QEMU 虚拟时间膨胀严重，须轮询等 g_now 跨过第一个预算窗口再采样。"""
     ctx.serial.expect(READY_LINE, timeout=20)
     ctx.serial.send("taskdemo bg")
     ctx.serial.expect(r"BG-DONE", timeout=60)
-    ctx.serial.send("tasks")
-    m = ctx.serial.expect(r"\[POTATO\]\[TS\] dbg cls=BG st=\d+ cpu=(\d+)", timeout=8)
-    m2 = ctx.serial.expect(r"\[POTATO\]\[TS\] now=(\d+) switches=\d+", timeout=5)
-    cpu, now = int(m.group(1)), int(m2.group(1))
+    ctx.serial.send("taskdemo off")
+
+    import re as _re
+    cpu = now = 0
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        ctx.serial.send("tasks")
+        # " sw=" 哨兵确保数字完整（避免行传输中途匹配截读）
+        m = ctx.serial.expect(r"\[POTATO\]\[TS\] dbg cls=BG st=\d+ cpu=(\d+) sw=", timeout=8)
+        m2 = ctx.serial.expect(r"\[POTATO\]\[TS\] now=(\d+) swi", timeout=5)
+        cpu, now = int(m.group(1)), int(m2.group(1))
+        if now >= 1200:  # 跨过第一个预算窗口
+            break
+        time.sleep(1.0)
     share = cpu / now if now else 1.0
-    assert share <= 0.85, f"后台 CPU 占用 {share:.0%} 超预算+容差"
-    assert share > 0.0, "后台零占用异常"
+    assert now >= 1200, f"虚拟时间停滞 now={now}"
+    assert share <= 0.75, f"窗口后后台 CPU 占用 {share:.0%} 超预算+容差"
 
 
 def test_sleep_cadence(ctx):

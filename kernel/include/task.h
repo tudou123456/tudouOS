@@ -83,6 +83,8 @@ void pot_sched_init(void);
 void pot_sched_tick(uint32_t elapsed);   /* tick 补记后调用（记账+唤醒） */
 int  pot_sched_try_syscall(void *frame_base); /* 调度 syscall 识别+切换（不返回） */
 int  pot_sched_others_ready(void);            /* 有非 idle 就绪任务（idle 让路判据） */
+void pot_sched_sleep_until(uint32_t until);   /* 睡到绝对 tick（消息通道等待复用） */
+int  pot_sched_wake(pot_task_t *t);           /* 显式唤醒（通道进度通知），1=已唤醒 */
 void pot_sched_diag(uint32_t *out);           /* 诊断计数 [wake,preempt,switch,idle] */
 
 /* 统计（console/测试用） */

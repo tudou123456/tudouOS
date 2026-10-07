@@ -83,6 +83,7 @@ def test_my_feature(ctx):
 | 通用异常不回填 EPC1/EPS1/EXCVADDR（level-1 中断会回填） | 异常现场保留字段，测试只断言 EXCCAUSE 与恢复语义 |
 | 多任务负载下虚拟时间显著膨胀（且常快于墙钟） | 测试用宿主时钟+宽容差断言，顺序敏感断言改为无序等待 |
 | 高频轮询 MMIO 不可取 | 时序热点避免 MMIO 轮询，用 ccount |
+| **GCC 会为零开销 loop 指令发射代码，但 QEMU 的 esp32s3 核心配置未实现该选项**（工具链 core-isa.h `XCHAL_HAVE_LOOPS` 为 undef，dynconfig 却放行）——执行即随机错值/非法指令，表现为 memset/strcmp/扫描函数间歇性出错（M2 的 strcmp 崩溃、M3.5 的 ack 窗口误命中皆此因） | 内核全部计数循环用 **volatile 索引**禁掉该优化（lib_shim.c/sched.c/console.c/msg.c 有统一注释）；新增代码含 for/while 计数循环时同此写法，或构建后 `objdump -d | grep loop` 验证为 0 |
 
 另有两坑在构建侧（已固化进 build.py/链接脚本，详见代码注释）：
 - Xtensa `l32r` 字面量必须在指令之前且 4 字节对齐——链接脚本把 `.literal`

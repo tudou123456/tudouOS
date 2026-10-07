@@ -17,7 +17,11 @@ enum {
     TR_IRQ_EXIT  = 2,   /* a=level                b=0 */
     TR_EXCEPTION = 3,   /* a=EXCCAUSE             b=EPC */
     TR_SCHED_SWITCH = 16, /* a=from TCB 指针       b=to TCB 指针 */
-    /* 预留段：TR_MSG_* = 32..（M3.5） */
+    TR_MSG_ENQ   = 32,  /* a=通道指针             b=消息 id */
+    TR_MSG_DEQ   = 33,  /* a=通道指针             b=消息 id */
+    TR_MSG_DROP  = 34,  /* a=通道指针             b=原因(1full/2deadline/3dedup) */
+    TR_MSG_RETRY = 35,  /* a=通道指针             b=消息 id */
+    TR_MSG_ACK   = 36,  /* a=通道指针             b=消息 id */
 };
 
 void trace_init(void);

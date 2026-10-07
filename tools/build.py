@@ -102,10 +102,11 @@ def main():
                       glob.glob(os.path.join(KERNEL_DIR, "time", "*.c")) +
                       glob.glob(os.path.join(KERNEL_DIR, "trace", "*.c")) +
                       glob.glob(os.path.join(KERNEL_DIR, "sched", "*.c")) +
-                      glob.glob(os.path.join(KERNEL_DIR, "sched", "*.S"))):
+                      glob.glob(os.path.join(KERNEL_DIR, "sched", "*.S")) +
+                      glob.glob(os.path.join(KERNEL_DIR, "msg", "*.c"))):
         obj = os.path.join(OBJDIR, os.path.splitext(os.path.basename(src))[0] + ".o")
-        subprocess.run([cc] + (cflags if src.endswith(".c") else asm_flags) +
-                       ["-c", src, "-o", obj], check=True, shell=False, env=env)
+        flags = cflags if src.endswith(".c") else asm_flags
+        subprocess.run([cc] + flags + ["-c", src, "-o", obj], check=True, shell=False, env=env)
         print("   CC", os.path.basename(src))
         objs.append(obj)
 

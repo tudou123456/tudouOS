@@ -4,9 +4,9 @@
 研发检验全程跑在 QEMU（乐鑫官方分支，`-machine esp32s3`），由 Python
 QMP 测试台自动验收；同一份镜像可用 esptool 直接烧入真机开发板。
 
-> 当前阶段：**M3 已完成**——RTOS 核心落地（任务/上下文切换/三分类抢占
-> 调度：AI通信/UI/后台 + 老化防饿死 + 后台预算限速），测试台 **14 用例
-> 全绿**（M1×4 + M2×5 + M3×5）。产品定位与四大核心支柱（内核原生 MCP
+> 当前阶段：**M3.5 已完成**——RTOS 核心 + 内核消息基座（有界通道/
+> QoS0-2/回执/重发去重/健康快照）落地，测试台 **20 用例全绿**
+> （M1×4 + M2×5 + M3×5 + M3.5×6）。产品定位与四大核心支柱（内核原生 MCP
 > 消息总线 / 仿真硬件双端同源 / 内核可观测 / AI 交互低抖动调度）见
 > [docs/architecture.md](docs/architecture.md)，MCP 消息基座设计见
 > [docs/mcp-bus-design.md](docs/mcp-bus-design.md)。
@@ -60,7 +60,7 @@ esptool --chip esp32s3 --port COMx --baud 921600 \
 
 （0x0 为 S3 二级引导偏移，构建结束也会打印。串口 115200-8N1。）
 
-## 测试用例（M1+M2+M3 验收，14 个全绿）
+## 测试用例（M1~M3.5 验收，20 个全绿）
 
 | 用例 | 验证 |
 | --- | --- |
@@ -78,10 +78,20 @@ esptool --chip esp32s3 --port COMx --baud 921600 \
 | test_bg_budget | 后台预算限速（1000tick 窗口 ≤700tick） |
 | test_sleep_cadence | 任务睡眠节拍（宿主时钟容差断言） |
 | test_sched_trace | 追踪环含 SCHED_SWITCH 事件（调度可回放） |
+| test_msg_flood | 消息洪泛 12.5×容量：有界不 OOM、丢新计数准确、系统存活 |
+| test_msg_qos1_ping | QoS1 收发回执：20 条全部送达且回执，零丢失零重发 |
+| test_msg_retry_dedup | 延迟回执触发重发：去重窗口保证恰一次投递 |
+| test_msg_timeout | 无接收方 QoS1：重发耗尽后失败上报（不无限重发） |
+| test_msg_disconnect_heal | QMP 冻结模拟断线：恢复后无丢失无重复 |
+| test_msg_trace | 追踪环含 MSG_ENQ/DEQ/ACK 事件（消息流水可回放） |
 
 **调度观测命令**：`tasks`（各任务状态/CPU 占用/切换数/诊断计数）、
 `taskdemo preempt|stress|bg|off`（调度演示与压测）、`sleep <ms>`、
 `flood <n>`（串口压测）。
+
+**消息基座命令**（M3.5）：`msgdemo flood|ping|lazy|timeout|heal [n]`
+（洪泛/回执/延迟回执/超时/断线自愈压测）、`msgstat`（通道健康快照：
+水位/丢弃/重发/回执计数）。
 
 ## 常见问题
 

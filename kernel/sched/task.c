@@ -57,7 +57,7 @@ int pot_task_create(pot_task_t *tcb, const char *name, pot_task_class_t cls,
     uint32_t top = (uint32_t)(stack + stack_words) & ~15u;
     uint32_t *frame = (uint32_t *)(top - FRAME_WORDS * 4);
 
-    for (int i = 0; i < FRAME_WORDS; i++) {
+    for (volatile int i = 0; i < FRAME_WORDS; i++) {
         frame[i] = 0;
     }
     frame[0] = (uint32_t)pot_task_trampoline; /* a0：首启 PC */

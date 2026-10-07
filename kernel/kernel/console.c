@@ -6,6 +6,7 @@
 #include "demo.h"
 #include "intc.h"
 #include "lib_shim.h"
+#include "msgdemo.h"
 #include "potato.h"
 #include "task.h"
 #include "tick.h"
@@ -15,11 +16,12 @@
 
 /* ---------- mini printf ---------- */
 
-/* LX7 无硬件除法指令，二进制长除法自实现，避免链接 libgcc（窗口 ABI） */
+/* LX7 无硬件除法指令，二进制长除法自实现，避免链接 libgcc（窗口 ABI）。
+ * volatile 索引禁 loop 指令（该 QEMU 不支持，见 lib_shim.c 注释）。 */
 static uint32_t udiv32(uint32_t n, uint32_t d, uint32_t *rem)
 {
     uint32_t q = 0, r = 0;
-    for (int i = 31; i >= 0; i--) {
+    for (volatile int i = 31; i >= 0; i--) {
         r = (r << 1) | ((n >> i) & 1u);
         if (r >= d) {
             r -= d;
@@ -36,19 +38,22 @@ static void put_unsigned(uint32_t v, uint32_t base, int width, char pad)
 {
     char buf[12]; /* 十进制最长 10 位，十六进制 8 位 */
     const char *digits = "0123456789abcdef";
-    int i = 0;
+    volatile int i = 0;
 
     do {
         uint32_t r;
         v = udiv32(v, base, &r);
-        buf[i++] = digits[r];
+        buf[i] = digits[r];
+        i++;
     } while (v != 0u && i < (int)sizeof(buf));
 
     while (i < width) {
-        buf[i++] = pad; /* buf 按 LSD 在前存放，填充符排在高位即输出在前 */
+        buf[i] = pad; /* buf 按 LSD 在前存放，填充符排在高位即输出在前 */
+        i++;
     }
     while (i > 0) {
-        uart_putc(buf[--i]);
+        i--;
+        uart_putc(buf[i]);
     }
 }
 
@@ -127,7 +132,8 @@ void potato_printf(const char *fmt, ...)
 static void cmd_help(void)
 {
     uart_puts("commands: help, ping, echo <text>, info, tickstat, trace [n], "
-              "tasks, taskdemo <mode>, sleep <ms>, crash\r\n");
+              "tasks, taskdemo <mode>, sleep <ms>, msgdemo <mode> [n], "
+              "msgstat, flood <n>, crash\r\n");
 }
 
 static void cmd_info(void)
@@ -221,6 +227,35 @@ static void cmd_flood(const char *arg)
     potato_printf("[POTATO][F] FLOOD-DONE %u\r\n", n);
 }
 
+static void cmd_msgdemo(const char *arg)
+{
+    /* 参数：<mode> [n]，手动拆首词 */
+    char mode[12];
+    int mi = 0;
+    while (*arg != '\0' && *arg != ' ' && mi < (int)sizeof(mode) - 1) {
+        mode[mi++] = *arg++;
+    }
+    mode[mi] = '\0';
+    while (*arg == ' ') {
+        arg++;
+    }
+    unsigned n = parse_dec(arg, 0);
+
+    if (strcmp(mode, "off") == 0) {
+        msgdemo_stop();
+        uart_puts("[POTATO][M] msgdemo stop-req\r\n");
+        return;
+    }
+    int r = msgdemo_start(mode, n);
+    if (r == 0) {
+        potato_printf("[POTATO][M] msgdemo %s n=%u started\r\n", mode, n);
+    } else if (r == -1) {
+        uart_puts("[POTATO][M] msgdemo busy (msgdemo off first)\r\n");
+    } else {
+        potato_printf("[POTATO][M] unknown mode (%s)\r\n", msgdemo_mode_help());
+    }
+}
+
 static void cmd_crash(void)
 {
     uart_puts("[POTATO] crashing on purpose (ill) ...\r\n");
@@ -229,16 +264,20 @@ static void cmd_crash(void)
 
 static void cmd_dispatch(char *line)
 {
-    /* 就地把首词和参数拆开 */
-    char *arg = line;
-    while (*arg != '\0' && *arg != ' ') {
-        arg++;
+    /* 就地把首词和参数拆开（volatile 索引禁 loop 指令，见 lib_shim.c） */
+    volatile int k = 0;
+    while (line[k] != '\0' && line[k] != ' ') {
+        k++;
     }
+    char *arg = line + k;
     if (*arg == ' ') {
-        *arg++ = '\0';
-        while (*arg == ' ') {
-            arg++;
+        *arg = '\0';
+        arg++;
+        volatile int s = 0;
+        while (arg[s] == ' ') {
+            s++;
         }
+        arg += s;
     }
 
     if (strcmp(line, "") == 0) {
@@ -284,6 +323,14 @@ static void cmd_dispatch(char *line)
         cmd_flood(arg);
         return;
     }
+    if (strcmp(line, "msgdemo") == 0) {
+        cmd_msgdemo(arg);
+        return;
+    }
+    if (strcmp(line, "msgstat") == 0) {
+        msgdemo_stat();
+        return;
+    }
     if (strcmp(line, "crash") == 0) {
         cmd_crash();
         return;
@@ -298,7 +345,7 @@ void console_run(void)
     uart_puts("[POTATO] type 'help' for commands\r\n");
     for (;;) {
         uart_puts("potato> ");
-        int n = 0;
+        volatile int n = 0;
         for (;;) {
             int c = uart_getc();
             if (c < 0) {
@@ -320,7 +367,8 @@ void console_run(void)
                 continue;
             }
             if (n < CMD_BUF_LEN - 1) {
-                buf[n++] = (char)c;
+                buf[n] = (char)c;
+                n++;
                 uart_putc((char)c); /* 回显，测试台日志可读 */
             }
         }

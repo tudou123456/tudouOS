@@ -23,7 +23,7 @@ static uint32_t g_stk_ai[1024], g_stk_ui[1024], g_stk_bg[1024];
 static void burn(void)
 {
     volatile uint32_t x = 0;
-    for (uint32_t i = 0; i < DEMO_BURN; i++) {
+    for (volatile uint32_t i = 0; i < DEMO_BURN; i++) {
         x = x + i;
     }
     (void)x;
@@ -39,7 +39,7 @@ static void beat(void)
 static void ai_task(void *arg)
 {
     (void)arg;
-    for (int i = 0; i < 120 && !pot_task_self()->stop_req; i++) {
+    for (int i = 0; i < 200 && !pot_task_self()->stop_req; i++) {
         beat();
         potato_printf("[POTATO][D] A %d\r\n", i);
     }

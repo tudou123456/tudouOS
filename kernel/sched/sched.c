@@ -43,6 +43,7 @@ static uint32_t g_win_start;
 
 /* 诊断计数（TODO(M3 debug): 稳定后移除） */
 volatile uint32_t g_diag_wake, g_diag_preempt, g_diag_switch, g_diag_idle;
+volatile uint32_t g_diag_wake_ok, g_diag_wake_miss;
 
 _Static_assert(offsetof(pot_task_t, sp) == 4, "switch.S TCB_SP_OFF");
 
@@ -93,20 +94,21 @@ static void enqueue_ready(pot_task_t *t)
     if (g_ready_n[c] >= SLOTS) {
         return;
     }
-    for (int i = 0; i < g_ready_n[c]; i++) {
+    for (volatile int i = 0; i < g_ready_n[c]; i++) {
         if (g_ready[c][i] == t) {
             return; /* 已在表（防御） */
         }
     }
-    g_ready[c][g_ready_n[c]++] = t;
+    g_ready[c][g_ready_n[c]] = t;
+    g_ready_n[c]++;
 }
 
 static void dequeue(pot_task_t *t)
 {
     int c = slot_of(t);
-    for (int i = 0; i < g_ready_n[c]; i++) {
+    for (volatile int i = 0; i < g_ready_n[c]; i++) {
         if (g_ready[c][i] == t) {
-            for (int j = i; j < g_ready_n[c] - 1; j++) {
+            for (volatile int j = i; j < g_ready_n[c] - 1; j++) {
                 g_ready[c][j] = g_ready[c][j + 1];
             }
             g_ready_n[c]--;
@@ -120,12 +122,13 @@ static void sleep_add(pot_task_t *t)
     if (g_sleep_n >= SLOTS) {
         return;
     }
-    for (int i = 0; i < g_sleep_n; i++) {
+    for (volatile int i = 0; i < g_sleep_n; i++) {
         if (g_sleep[i] == t) {
             return;
         }
     }
-    g_sleep[g_sleep_n++] = t;
+    g_sleep[g_sleep_n] = t;
+    g_sleep_n++;
 }
 
 /* ---------- 优先级与挑选 ---------- */
@@ -233,6 +236,35 @@ int pot_sched_try_syscall(void *frame_base)
     return 1; /* 不可达 */
 }
 
+/* ---------- 消息基座配套的阻塞/唤醒原语（M3.5） ---------- */
+
+void pot_sched_syscall_sleep(uint32_t until); /* switch.S */
+void pot_sched_syscall_yield(void);           /* switch.S */
+
+/* 当前任务睡到绝对时刻 until（tick）—— pot_task_sleep 的底层，消息通道等待复用 */
+void pot_sched_sleep_until(uint32_t until)
+{
+    pot_sched_syscall_sleep(until);
+}
+
+/* 显式唤醒：从睡眠表移除并入就绪表（空转/协作唤醒，醒来者在检查点重查条件）。
+ * 非睡眠态为无害空操作。返回 1=已唤醒 */
+int pot_sched_wake(pot_task_t *t)
+{
+    for (volatile int i = 0; i < g_sleep_n; i++) {
+        if (g_sleep[i] == t) {
+            for (volatile int j = i; j < g_sleep_n - 1; j++) {
+                g_sleep[j] = g_sleep[j + 1];
+            }
+            g_sleep_n--;
+            t->state = POTTASK_READY;
+            enqueue_ready(t);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* ---------- tick 钩子（v3：仅记账+唤醒，切换在任务检查点） ---------- */
 
 void pot_sched_tick(uint32_t elapsed)
@@ -253,10 +285,10 @@ void pot_sched_tick(uint32_t elapsed)
 
     int woke_better = 0;
     int cur_p = (pot_current != 0) ? eff_prio(pot_current) : 0;
-    for (int i = 0; i < g_sleep_n; ) {
+    for (volatile int i = 0; i < g_sleep_n; ) {
         pot_task_t *t = g_sleep[i];
         if ((int32_t)(g_now - t->sleep_until) >= 0) {
-            for (int j = i; j < g_sleep_n - 1; j++) {
+            for (volatile int j = i; j < g_sleep_n - 1; j++) {
                 g_sleep[j] = g_sleep[j + 1];
             }
             g_sleep_n--;
