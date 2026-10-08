@@ -1,5 +1,6 @@
 #include <stdint.h>
 
+#include "driver.h"
 #include "io.h"
 #include "uart.h"
 
@@ -117,3 +118,13 @@ uint32_t uart_rx_bytes(void)
 {
     return g_rx_bytes;
 }
+
+/* ---- 驱动框架注册（M5）：UART 为首个注册驱动 ---- */
+
+static int uart_drv_init(void)
+{
+    uart_init();
+    return 0;
+}
+
+POT_DRIVER_REGISTER(uart, uart_drv_init, 10);

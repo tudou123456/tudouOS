@@ -83,6 +83,8 @@ def test_my_feature(ctx):
 | 通用异常不回填 EPC1/EPS1/EXCVADDR（level-1 中断会回填） | 异常现场保留字段，测试只断言 EXCCAUSE 与恢复语义 |
 | 多任务负载下虚拟时间显著膨胀（且常快于墙钟） | 测试用宿主时钟+宽容差断言，顺序敏感断言改为无序等待 |
 | 高频轮询 MMIO 不可取 | 时序热点避免 MMIO 轮询，用 ccount |
+| **ROM 无 flash 映射能力**：对 VMA 在 0x42/0x3c 映射窗口的镜像段走 RAM 拷贝路径，直接 LoadStoreError 踩崩（Guru Meditation）——IDF 的 XIP 是其 RAM 常驻 bootloader 配好 MMU 后再跳的 | 自研二级映射引导（M5）：IROM 段从引导 ELF 剥离（objcopy --remove-section），LMA 落 flash 0x10020；boot.S 配 MMU（表@0x600C5000）+ icache（0x600C4060）后跳 XIP |
+| esptool 会把 flash 映射段排在镜像最前且强加 64KB 页对齐填充段 | 引导镜像只含 RAM 段（esptool 看不到 IROM），IROM 经 merge-bin 按 0x10020 独立合入 |
 | **GCC 会为零开销 loop 指令发射代码，但 QEMU 的 esp32s3 核心配置未实现该选项**（工具链 core-isa.h `XCHAL_HAVE_LOOPS` 为 undef，dynconfig 却放行）——执行即随机错值/非法指令，表现为 memset/strcmp/扫描函数间歇性出错（M2 的 strcmp 崩溃、M3.5 的 ack 窗口误命中皆此因） | 内核全部计数循环用 **volatile 索引**禁掉该优化（lib_shim.c/sched.c/console.c/msg.c 有统一注释）；新增代码含 for/while 计数循环时同此写法，或构建后 `objdump -d | grep loop` 验证为 0 |
 
 另有两坑在构建侧（已固化进 build.py/链接脚本，详见代码注释）：

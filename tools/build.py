@@ -25,6 +25,7 @@ INCLUDE_DIR = os.path.join(KERNEL_DIR, "include")
 LINKER_SCRIPT = os.path.join(KERNEL_DIR, "linker", "tudou.ld")
 ELF = os.path.join(BUILD, "kernel.elf")
 BOOT_BIN = os.path.join(BUILD, "potato_boot.bin")
+IROM_BIN = os.path.join(BUILD, "irom.bin")
 FLASH_IMG = os.path.join(BUILD, "flash_image.bin")
 
 PROBE_SRC = "int probe(void) { return 0; }\n"
@@ -82,9 +83,11 @@ def main():
     env = toolchain_env(cc)
     mcpu = probe_mcpu(cc, env)
 
-    base_flags = ["-mabi=call0", "-mlongcalls", "-mauto-litpools"] + mcpu
-    # 汇编不走 auto-litpools；内核尚小，直跳完全够用且避免 l32r 字面量错位问题
-    asm_flags = ["-mabi=call0", "-I", INCLUDE_DIR] + mcpu
+    base_flags = ["-mabi=call0", "-mlongcalls", "-mauto-litpools",
+                  "-DTUDOU_PLATFORM=0"] + mcpu
+    # 汇编：M5 起跨区调用（IRAM 汇编 ↔ IROM C 代码）需要长调用（l32r+callx0）；
+    # 字面量由链接脚本归入 IRAM（l32r 向后取，详见 tudou.ld）
+    asm_flags = ["-mabi=call0", "-mlongcalls", "-I", INCLUDE_DIR] + mcpu
     cflags = base_flags + [
         "-O2", "-g", "-Wall", "-Wextra", "-std=gnu11",
         "-ffreestanding", "-fno-builtin", "-fno-stack-protector",
@@ -104,7 +107,9 @@ def main():
                       glob.glob(os.path.join(KERNEL_DIR, "sched", "*.c")) +
                       glob.glob(os.path.join(KERNEL_DIR, "sched", "*.S")) +
                       glob.glob(os.path.join(KERNEL_DIR, "msg", "*.c")) +
-                      glob.glob(os.path.join(KERNEL_DIR, "mem", "*.c"))):
+                      glob.glob(os.path.join(KERNEL_DIR, "mem", "*.c")) +
+                      glob.glob(os.path.join(KERNEL_DIR, "pal", "*.c")) +
+                      glob.glob(os.path.join(KERNEL_DIR, "driver", "*.c"))):
         obj = os.path.join(OBJDIR, os.path.splitext(os.path.basename(src))[0] + ".o")
         flags = cflags if src.endswith(".c") else asm_flags
         subprocess.run([cc] + flags + ["-c", src, "-o", obj], check=True, shell=False, env=env)
@@ -120,24 +125,34 @@ def main():
                     "-o", ELF] + objs, check=True, shell=False, env=env)
 
     # ---- 3. elf2image ----
-    print("[3/4] 生成 ESP 镜像 potato_boot.bin ...")
+    print("[3] 生成 ESP 镜像 potato_boot.bin ...")
     v = esptool_major()
     # v5 用连字符长选项(--flash-mode)；v4 用下划线(--flash_mode)
     fs = "--flash-" if v >= 5 else "--flash_"
+    BOOT_ELF = os.path.join(BUILD, "kernel_boot.elf")
+    subprocess.run([cc.replace("gcc", "objcopy"), "--remove-section=.irom_text",
+                    ELF, BOOT_ELF], check=True, shell=False, env=env)
     subprocess.run([sys.executable, "-m", "esptool", "--chip", "esp32s3", "elf2image",
                     fs + "mode", "dio",
                     fs + "freq", "80m",
                     fs + "size", "4MB",
-                    "-o", BOOT_BIN, ELF], check=True, shell=False, env=env)
+                    "-o", BOOT_BIN, BOOT_ELF], check=True, shell=False, env=env)
 
-    # ---- 4. merge-bin（单镜像内核放在二级引导偏移处，其余留空）----
-    print("[4/4] 合成 flash 镜像 flash_image.bin ...")
+    # ---- 4b. 抽取 IROM 段（C 代码+只读数据，LMA 0x10020 起）----
+    print("[4b] 抽取 IROM 段 irom.bin ...")
+    subprocess.run([cc.replace("gcc", "objcopy"), "-O", "binary",
+                    "--only-section=.irom_text", ELF, IROM_BIN],
+                   check=True, shell=False, env=env)
+
+    # ---- 5. 合成 flash 镜像：引导镜像@0x0 + IROM@0x10020（自研二级映射布局）----
+    print("[5] 合成 flash 镜像 flash_image.bin ...")
     offset = bootloader_offset()
     merge = "merge-bin" if v >= 5 else "merge_bin"
     pad = "--pad-to-size" if v >= 5 else "--fill-flash-size"
     subprocess.run([sys.executable, "-m", "esptool", "--chip", "esp32s3", merge,
                     "-o", FLASH_IMG, pad, "4MB",
-                    format(offset, "#x"), BOOT_BIN], check=True, shell=False, env=env)
+                    format(offset, "#x"), BOOT_BIN,
+                    "0x10020", IROM_BIN], check=True, shell=False, env=env)
 
     print()
     print("构建完成:")

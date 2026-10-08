@@ -4,11 +4,13 @@
 
 #include "console.h"
 #include "demo.h"
+#include "driver.h"
 #include "heap.h"
 #include "intc.h"
 #include "lib_shim.h"
 #include "memdemo.h"
 #include "msgdemo.h"
+#include "pal.h"
 #include "potato.h"
 #include "task.h"
 #include "tick.h"
@@ -135,7 +137,8 @@ static void cmd_help(void)
 {
     uart_puts("commands: help, ping, echo <text>, info, tickstat, trace [n], "
               "tasks, taskdemo <mode>, sleep <ms>, msgdemo <mode> [n], "
-              "msgstat, memstat, memtest <mode> [n], flood <n>, crash\r\n");
+              "msgstat, memstat, memtest <mode> [n], pal, drivers, "
+              "flood <n>, crash\r\n");
 }
 
 static void cmd_info(void)
@@ -304,6 +307,27 @@ static void cmd_memtest(const char *arg)
     mem_cmd_dispatch(mode, n);
 }
 
+static void cmd_pal(void)
+{
+    potato_printf("[POTATO][PAL] platform=%s tick=%s cpu_hz=%u\r\n",
+                  pot_pal_name(),
+                  pot_pal_tick_mode() == POT_TICK_POLL ? "poll" : "irq",
+                  pot_pal_cpu_hz());
+}
+
+static void cmd_drivers(void)
+{
+    int n = pot_driver_count();
+    if (n == 0) {
+        uart_puts("[POTATO][DRV] no drivers registered\r\n");
+        return;
+    }
+    for (volatile int i = 0; i < n; i++) {
+        potato_printf("[POTATO][DRV] %s status=%d\r\n",
+                      pot_driver_name(i), pot_driver_status(i));
+    }
+}
+
 static void cmd_crash(void)
 {
     uart_puts("[POTATO] crashing on purpose (ill) ...\r\n");
@@ -385,6 +409,14 @@ static void cmd_dispatch(char *line)
     }
     if (strcmp(line, "memtest") == 0) {
         cmd_memtest(arg);
+        return;
+    }
+    if (strcmp(line, "pal") == 0) {
+        cmd_pal();
+        return;
+    }
+    if (strcmp(line, "drivers") == 0) {
+        cmd_drivers();
         return;
     }
     if (strcmp(line, "crash") == 0) {

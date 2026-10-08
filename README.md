@@ -4,9 +4,10 @@
 研发检验全程跑在 QEMU（乐鑫官方分支，`-machine esp32s3`），由 Python
 QMP 测试台自动验收；同一份镜像可用 esptool 直接烧入真机开发板。
 
-> 当前阶段：**M4 已完成**——RTOS 核心 + 消息基座 + 轻量内存管理
-> （TLSF 类分配器/canary 护栏/碎片度量）落地，测试台 **26 用例全绿**
-> （M1×4 + M2×5 + M3×5 + M3.5×6 + M4×6）。产品定位与四大核心支柱（内核原生 MCP
+> 当前阶段：**M5 已完成**——RTOS 核心 + 消息基座 + 内存管理 +
+> **自研二级映射引导/flash XIP/PAL/驱动框架**落地，测试台 **31 用例全绿**
+> （M1×4 + M2×5 + M3×5 + M3.5×6 + M4×6 + M5×5）。内核主体已在
+> flash 0x42 窗口 XIP 执行（IRAM 仅剩 <1KB 向量+汇编）。产品定位与四大核心支柱（内核原生 MCP
 > 消息总线 / 仿真硬件双端同源 / 内核可观测 / AI 交互低抖动调度）见
 > [docs/architecture.md](docs/architecture.md)，MCP 消息基座设计见
 > [docs/mcp-bus-design.md](docs/mcp-bus-design.md)。
@@ -60,7 +61,7 @@ esptool --chip esp32s3 --port COMx --baud 921600 \
 
 （0x0 为 S3 二级引导偏移，构建结束也会打印。串口 115200-8N1。）
 
-## 测试用例（M1~M4 验收，26 个全绿）
+## 测试用例（M1~M5 验收，31 个全绿）
 
 | 用例 | 验证 |
 | --- | --- |
@@ -90,6 +91,11 @@ esptool --chip esp32s3 --port COMx --baud 921600 \
 | test_mem_exhaust | 耗尽失败计数，全释放后大块复得 |
 | test_mem_churn_soak | 随机尺寸持续压测零损坏零泄漏（alloc/free 平衡） |
 | test_mem_trace | 追踪环含 MEM_ALLOC/FREE 事件（分配流水可回放） |
+| test_xip_memory_map | XIP 布局：irom@0x42 flash 窗口，IRAM≤4KB |
+| test_xip_boot_chain | ROM 仅搬 RAM 段（引导链路证明） |
+| test_pal_info | PAL 平台/时基模式查询（双端接口） |
+| test_driver_framework | 驱动链接期注册/启动初始化/运行枚举 |
+| test_xip_full_function | XIP 下调度/消息/内存全子系统烟测 |
 
 **调度观测命令**：`tasks`（各任务状态/CPU 占用/切换数/诊断计数）、
 `taskdemo preempt|stress|bg|off`（调度演示与压测）、`sleep <ms>`、
@@ -102,6 +108,9 @@ esptool --chip esp32s3 --port COMx --baud 921600 \
 **内存管理命令**（M4）：`memstat`（堆健康快照：总量/占用/最大块/
 水位/分配释放失败捕获计数/碎片率）、`memtest selftest|holes|fault|
 exhaust|churn|off`（分配回归/碎片合并/越界注入/耗尽恢复/soak 压测）。
+
+**平台/驱动命令**（M5）：`pal`（平台名/时基模式/CPU 频率）、
+`drivers`（已注册驱动与初始化状态）。
 
 ## 常见问题
 
