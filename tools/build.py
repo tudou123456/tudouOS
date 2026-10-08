@@ -103,7 +103,8 @@ def main():
                       glob.glob(os.path.join(KERNEL_DIR, "trace", "*.c")) +
                       glob.glob(os.path.join(KERNEL_DIR, "sched", "*.c")) +
                       glob.glob(os.path.join(KERNEL_DIR, "sched", "*.S")) +
-                      glob.glob(os.path.join(KERNEL_DIR, "msg", "*.c"))):
+                      glob.glob(os.path.join(KERNEL_DIR, "msg", "*.c")) +
+                      glob.glob(os.path.join(KERNEL_DIR, "mem", "*.c"))):
         obj = os.path.join(OBJDIR, os.path.splitext(os.path.basename(src))[0] + ".o")
         flags = cflags if src.endswith(".c") else asm_flags
         subprocess.run([cc] + flags + ["-c", src, "-o", obj], check=True, shell=False, env=env)

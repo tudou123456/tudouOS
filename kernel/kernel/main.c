@@ -1,6 +1,7 @@
 #include "potato.h"
 
 #include "console.h"
+#include "heap.h"
 #include "intc.h"
 #include "task.h"
 #include "tick.h"
@@ -26,6 +27,7 @@ void kernel_main(void)
     time_source_init();
     tick_init();
     pot_sched_init(); /* M3：调度器（main 即控制台任务，idle 兜底） */
+    pot_heap_init(); /* M4：轻量堆（消息基座大负载/动态栈的地基） */
     uart_irq_init();
 
     potato_printf("\r\n[POTATO] %s v%s (%s kernel) on %s\r\n",

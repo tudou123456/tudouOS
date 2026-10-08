@@ -3,7 +3,7 @@
 
 #define POTATO_NAME    "tudouOS"
 #define POTATO_KERNEL  "potato"
-#define POTATO_VERSION "0.4.0"
+#define POTATO_VERSION "0.5.0"
 #define POTATO_TARGET  "ESP32-S3"
 
 /* 链接脚本导出的内存布局符号，kernel_main 里打印、测试台里断言 */

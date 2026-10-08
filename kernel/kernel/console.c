@@ -4,8 +4,10 @@
 
 #include "console.h"
 #include "demo.h"
+#include "heap.h"
 #include "intc.h"
 #include "lib_shim.h"
+#include "memdemo.h"
 #include "msgdemo.h"
 #include "potato.h"
 #include "task.h"
@@ -133,7 +135,7 @@ static void cmd_help(void)
 {
     uart_puts("commands: help, ping, echo <text>, info, tickstat, trace [n], "
               "tasks, taskdemo <mode>, sleep <ms>, msgdemo <mode> [n], "
-              "msgstat, flood <n>, crash\r\n");
+              "msgstat, memstat, memtest <mode> [n], flood <n>, crash\r\n");
 }
 
 static void cmd_info(void)
@@ -256,6 +258,52 @@ static void cmd_msgdemo(const char *arg)
     }
 }
 
+static void cmd_memstat(void)
+{
+    pot_heap_stat_t st;
+    pot_heap_getstat(&st);
+    potato_printf("[POTATO][MEM] total=%u used=%u free=%u largest=%u "
+                  "maxused=%u alloc=%u free_n=%u fail=%u faults=%u "
+                  "fragpct=%u/255\r\n",
+                  st.total, st.used, st.total - st.used, st.largest,
+                  st.max_used, st.n_alloc, st.n_free, st.n_fail, st.n_fault,
+                  st.total - st.used != 0u
+                      ? ((st.total - st.used - st.largest) * 255u) /
+                            (st.total - st.used)
+                      : 0u);
+}
+
+static void cmd_memtest(const char *arg)
+{
+    /* <mode> [n] 手动拆首词 */
+    char mode[12];
+    int mi = 0;
+    while (*arg != '\0' && *arg != ' ' && mi < (int)sizeof(mode) - 1) {
+        mode[mi++] = *arg++;
+    }
+    mode[mi] = '\0';
+    while (*arg == ' ') {
+        arg++;
+    }
+    unsigned n = parse_dec(arg, 0);
+
+    if (strcmp(mode, "off") == 0) {
+        memdemo_stop();
+        uart_puts("[POTATO][MEM] memtest stop-req\r\n");
+        return;
+    }
+    if (strcmp(mode, "churn") == 0) {
+        int r = memdemo_start("churn", 0);
+        if (r == 0) {
+            uart_puts("[POTATO][MEM] memtest churn started\r\n");
+        } else {
+            uart_puts("[POTATO][MEM] memtest busy\r\n");
+        }
+        return;
+    }
+    mem_cmd_dispatch(mode, n);
+}
+
 static void cmd_crash(void)
 {
     uart_puts("[POTATO] crashing on purpose (ill) ...\r\n");
@@ -329,6 +377,14 @@ static void cmd_dispatch(char *line)
     }
     if (strcmp(line, "msgstat") == 0) {
         msgdemo_stat();
+        return;
+    }
+    if (strcmp(line, "memstat") == 0) {
+        cmd_memstat();
+        return;
+    }
+    if (strcmp(line, "memtest") == 0) {
+        cmd_memtest(arg);
         return;
     }
     if (strcmp(line, "crash") == 0) {

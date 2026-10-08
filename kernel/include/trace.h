@@ -22,6 +22,9 @@ enum {
     TR_MSG_DROP  = 34,  /* a=通道指针             b=原因(1full/2deadline/3dedup) */
     TR_MSG_RETRY = 35,  /* a=通道指针             b=消息 id */
     TR_MSG_ACK   = 36,  /* a=通道指针             b=消息 id */
+    TR_MEM_ALLOC = 64,  /* a=块尺寸               b=tag */
+    TR_MEM_FREE  = 65,  /* a=块尺寸               b=tag */
+    TR_MEM_FAULT = 66,  /* a=原因(1overflow/2badfree) b=tag */
 };
 
 void trace_init(void);

@@ -61,6 +61,9 @@ static const char *event_name(uint16_t type)
     case TR_MSG_DROP:     return "MSG_DROP";
     case TR_MSG_RETRY:    return "MSG_RETRY";
     case TR_MSG_ACK:      return "MSG_ACK";
+    case TR_MEM_ALLOC:    return "MEM_ALLOC";
+    case TR_MEM_FREE:     return "MEM_FREE";
+    case TR_MEM_FAULT:    return "MEM_FAULT";
     default:              return "?";
     }
 }
