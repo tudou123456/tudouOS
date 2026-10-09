@@ -17,7 +17,7 @@ def test_boot_banner(ctx):
     """完整启动链路：ROM 日志 → 横幅/版本 → 内存布局 → READY。"""
     ctx.serial.expect(ROM_BANNER, timeout=20)
     m = ctx.serial.expect(VERSION_LINE, timeout=10)
-    assert m.group(1) == "0.6.0", f"版本号异常: {m.group(1)}"
+    assert m.group(1) == "0.7.0", f"版本号异常: {m.group(1)}"
     ctx.serial.expect(r"\[POTATO\] build .+", timeout=5)
     ctx.serial.expect(
         r"\[POTATO\] mem iram=0x[0-9a-f]+-0x[0-9a-f]+"
@@ -38,7 +38,7 @@ def test_ping_pong(ctx):
     ctx.serial.send("echo hello potato")
     ctx.serial.expect(r"hello potato", timeout=5)
     ctx.serial.send("info")
-    ctx.serial.expect(r"\[POTATO\] info: tudouOS v0\.6\.0", timeout=5)
+    ctx.serial.expect(r"\[POTATO\] info: tudouOS v0\.7\.0", timeout=5)
 
 
 def test_qmp_reset(ctx):

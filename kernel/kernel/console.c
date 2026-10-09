@@ -8,15 +8,19 @@
 #include "heap.h"
 #include "intc.h"
 #include "lib_shim.h"
+#include "mcp.h"
 #include "memdemo.h"
 #include "msgdemo.h"
 #include "pal.h"
 #include "potato.h"
+#include "potfs.h"
 #include "task.h"
 #include "tick.h"
 #include "time.h"
 #include "trace.h"
 #include "uart.h"
+
+#define CMD_BUF_LEN 224 /* MCP JSON-RPC 单行较长 */
 
 /* ---------- mini printf ---------- */
 
@@ -138,7 +142,9 @@ static void cmd_help(void)
     uart_puts("commands: help, ping, echo <text>, info, tickstat, trace [n], "
               "tasks, taskdemo <mode>, sleep <ms>, msgdemo <mode> [n], "
               "msgstat, memstat, memtest <mode> [n], pal, drivers, "
-              "flood <n>, crash\r\n");
+              "fs <sub>, mcp on|off, flood <n>, crash\r\n"
+              "  fs: ls|write <n> <t>|cat <n>|rm <n>|mkfs|df\r\n"
+              "  MCP: lines starting with '{' are JSON-RPC\r\n");
 }
 
 static void cmd_info(void)
@@ -328,6 +334,105 @@ static void cmd_drivers(void)
     }
 }
 
+static void cmd_fs(const char *arg)
+{
+    /* 子命令：ls | write <name> <text> | cat <name> | rm <name> | mkfs | df */
+    char sub[10];
+    int si = 0;
+    while (*arg != '\0' && *arg != ' ' && si < (int)sizeof(sub) - 1) {
+        sub[si++] = *arg++;
+    }
+    sub[si] = '\0';
+    while (*arg == ' ') {
+        arg++;
+    }
+
+    if (strcmp(sub, "mkfs") == 0) {
+        potfs_format();
+        uart_puts("[POTATO][FS] formatted\r\n");
+        return;
+    }
+    if (strcmp(sub, "ls") == 0) {
+        int n = potfs_count();
+        potato_printf("[POTATO][FS] %d files, %u bytes\r\n", n,
+                      potfs_total_bytes());
+        for (volatile int i = 0; i < POTFS_MAX_FILES; i++) {
+            const potfs_file_t *f = potfs_get(i);
+            if (f != 0) {
+                potato_printf("[POTATO][FS] %s %u\r\n", f->name, f->size);
+            }
+        }
+        return;
+    }
+    if (strcmp(sub, "cat") == 0) {
+        char buf[192];
+        int n = potfs_read(arg, buf, sizeof(buf) - 1);
+        if (n < 0) {
+            potato_printf("[POTATO][FS] cat: %s not found\r\n", arg);
+            return;
+        }
+        buf[n] = '\0';
+        potato_printf("[POTATO][FS] %s %u bytes:\r\n%s\r\n", arg, n, buf);
+        return;
+    }
+    if (strcmp(sub, "write") == 0) {
+        /* name 与 text 拆分 */
+        char name[POTFS_NAME_MAX];
+        int ni = 0;
+        while (*arg != '\0' && *arg != ' ' && ni < POTFS_NAME_MAX - 1) {
+            name[ni++] = *arg++;
+        }
+        name[ni] = '\0';
+        while (*arg == ' ') {
+            arg++;
+        }
+        int r = potfs_write(name, arg, (uint32_t)strlen(arg));
+        if (r < 0) {
+            uart_puts("[POTATO][FS] write failed\r\n");
+        } else {
+            potato_printf("[POTATO][FS] wrote %s %d bytes\r\n", name, r);
+        }
+        return;
+    }
+    if (strcmp(sub, "rm") == 0) {
+        if (potfs_delete(arg) == 0) {
+            potato_printf("[POTATO][FS] removed %s\r\n", arg);
+        } else {
+            potato_printf("[POTATO][FS] rm: %s not found\r\n", arg);
+        }
+        return;
+    }
+    if (strcmp(sub, "df") == 0) {
+        pot_heap_stat_t st;
+        pot_heap_getstat(&st);
+        potato_printf("[POTATO][FS] store=potfs(ram) files=%u/%u bytes=%u "
+                      "heap_free=%u\r\n",
+                      (unsigned)potfs_count(), (unsigned)POTFS_MAX_FILES,
+                      potfs_total_bytes(), st.total - st.used);
+        return;
+    }
+    uart_puts("[POTATO][FS] fs ls|write <n> <t>|cat <n>|rm <n>|mkfs|df\r\n");
+}
+
+static void cmd_mcp(const char *arg)
+{
+    if (strcmp(arg, "on") == 0) {
+        if (mcp_start() == 0) {
+            uart_puts("[POTATO][MCP] starting\r\n");
+        } else {
+            uart_puts("[POTATO][MCP] already running or no resource\r\n");
+        }
+        return;
+    }
+    if (strcmp(arg, "off") == 0) {
+        mcp_stop();
+        uart_puts("[POTATO][MCP] stop-req\r\n");
+        return;
+    }
+    potato_printf("[POTATO][MCP] running=%d (mcp on|off; "
+                  "JSON-RPC 行以 '{' 开头直接投递)\r\n", mcp_running());
+}
+
 static void cmd_crash(void)
 {
     uart_puts("[POTATO] crashing on purpose (ill) ...\r\n");
@@ -336,6 +441,16 @@ static void cmd_crash(void)
 
 static void cmd_dispatch(char *line)
 {
+    /* MCP 传输路由：'{' 开头的行投递消息基座（M6） */
+    if (line[0] == '{') {
+        if (mcp_submit_line(line, (uint32_t)strlen(line)) == 0) {
+            uart_puts("[POTATO][MCP] submitted\r\n");
+        } else {
+            uart_puts("[POTATO][MCP] channel full\r\n");
+        }
+        return;
+    }
+
     /* 就地把首词和参数拆开（volatile 索引禁 loop 指令，见 lib_shim.c） */
     volatile int k = 0;
     while (line[k] != '\0' && line[k] != ' ') {
@@ -417,6 +532,14 @@ static void cmd_dispatch(char *line)
     }
     if (strcmp(line, "drivers") == 0) {
         cmd_drivers();
+        return;
+    }
+    if (strcmp(line, "fs") == 0) {
+        cmd_fs(arg);
+        return;
+    }
+    if (strcmp(line, "mcp") == 0) {
+        cmd_mcp(arg);
         return;
     }
     if (strcmp(line, "crash") == 0) {

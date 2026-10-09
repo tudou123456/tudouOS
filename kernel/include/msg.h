@@ -22,7 +22,7 @@
  * （条件变量模式，允许虚假唤醒）。
  */
 
-#define POT_MSG_INLINE 28u /* 小负载按值 */
+#define POT_MSG_INLINE 192u /* MCP JSON-RPC 单行需较长内联负载 */
 #define POT_MSG_QOS0 0
 #define POT_MSG_QOS1 1
 #define POT_MSG_QOS2 2

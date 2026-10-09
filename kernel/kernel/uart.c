@@ -31,7 +31,7 @@
 #define UART_RXFIFO_FULL_INT (1u << 0)
 
 /* RX 环形缓冲：长度必须是 2 的幂 */
-#define RX_RING_LEN 128u
+#define RX_RING_LEN 256u
 static volatile char g_rx_ring[RX_RING_LEN];
 static volatile uint16_t g_rx_head;
 static volatile uint16_t g_rx_tail;
