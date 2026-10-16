@@ -20,9 +20,9 @@
 #include "trace.h"
 #include "uart.h"
 
-#define CMD_BUF_LEN 96 /* MCP JSON-RPC 行上限。注：放大到 224 前必须先把
-                          pot_json_free 的 next 链改迭代（栈深约束，见
-                          defect-report D-07），本处保持单一定义 */
+#define CMD_BUF_LEN 264 /* MCP 行上限 = POT_MSG_INLINE(256) + JSON-RPC 包裹余量。
+                           超长行显式报错（不静默截断，D-07）；json 释放已
+                           迭代化，长行的树释放无栈深风险 */
 
 /* ---------- mini printf ---------- */
 
@@ -620,8 +620,13 @@ static void cmd_dispatch(char *line)
 {
     /* MCP 传输路由：'{' 开头的行投递消息基座（M6） */
     if (line[0] == '{') {
-        if (mcp_submit_line(line, (uint32_t)strlen(line)) == 0) {
+        int r = mcp_submit_line(line, (uint32_t)strlen(line));
+        if (r == 0) {
             uart_puts("[POTATO][MCP] submitted\r\n");
+        } else if (r == 2) {
+            uart_puts("{\"jsonrpc\":\"2.0\",\"id\":null,"
+                      "\"error\":{\"code\":-32600,"
+                      "\"message\":\"request too long (max 256)\"}}\r\n");
         } else {
             uart_puts("[POTATO][MCP] channel full\r\n");
         }
@@ -750,6 +755,7 @@ void console_run(void)
     for (;;) {
         uart_puts("potato> ");
         volatile int n = 0;
+        volatile int overlong = 0;
         for (;;) {
             int c = uart_getc();
             if (c < 0) {
@@ -763,6 +769,7 @@ void console_run(void)
             if (c == 0x7f || c == '\b') {
                 if (n > 0) {
                     n--;
+                    overlong = 0; /* 回退后重判超长 */
                     uart_puts("\b \b");
                 }
                 continue;
@@ -774,7 +781,14 @@ void console_run(void)
                 buf[n] = (char)c;
                 n++;
                 uart_putc((char)c); /* 回显，测试台日志可读 */
+            } else {
+                overlong = 1; /* 继续吃掉本行剩余字符，收行时统一报错 */
             }
+        }
+        if (overlong) {
+            potato_printf("[POTATO] line too long (max %d), dropped\r\n",
+                          CMD_BUF_LEN - 1);
+            continue;
         }
         buf[n] = '\0';
         cmd_dispatch(buf);

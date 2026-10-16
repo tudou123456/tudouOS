@@ -78,6 +78,8 @@ def main():
     serial = SerialTap(port=serial_port).connect()
     qmp.command("cont")
 
+    marks = []
+    t0 = time.monotonic()
     try:
         for ln in lines:
             op, _, rest = ln.partition(" ")
@@ -91,7 +93,7 @@ def main():
             elif op == "sleep":
                 time.sleep(float(rest))
             elif op == "mark":
-                chunks.append(f"\n===== PROBE MARK: {rest} =====\n".encode())
+                marks.append(f"[{time.monotonic() - t0:.1f}s] {rest}")
             else:
                 print(f"未知指令: {ln}")
                 return 2
@@ -102,7 +104,10 @@ def main():
     else:
         rc = 0
     finally:
-        Path(args.out).write_text(serial.text, encoding="utf-8")
+        body = serial.text
+        if marks:
+            body += "\n\n===== PROBE MARKS =====\n" + "\n".join(marks) + "\n"
+        Path(args.out).write_text(body, encoding="utf-8")
         qmp.close()
         serial.close()
         proc.kill()

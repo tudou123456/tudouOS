@@ -17,12 +17,13 @@
  *                （指数退避，上限 POT_MSG_MAX_RETRY 次）后上报失败
  *   2 关键       满则阻塞发送方（有超时）不丢弃；重发不退避直至达成/失败
  *
- * 去重：入队按 (发送方, id) 滑动窗口，重发不产生重复投递。
- * 唤醒：通道进度（入队/出队/回执）显式唤醒等待者，醒来重查条件
- * （条件变量模式，允许虚假唤醒）。
+ * 去重：仅 QoS1/2（存在重发路径）按 (发送方, id) 滑动窗口拦截重复
+ * 投递；QoS0 无重发语义，不做去重（否则误杀合法新消息）。
+ * 唤醒：等待采用 2ms 切片睡眠轮询 + 醒来重查条件（v2 语义；
+ * v1 显式唤醒在该 QEMU 行为不可解释已废弃，真机阶段可恢复）。
  */
 
-#define POT_MSG_INLINE 192u /* MCP JSON-RPC 单行需较长内联负载 */
+#define POT_MSG_INLINE 256u /* MCP JSON-RPC 单行内联负载（D-07：容纳 initialize 握手） */
 #define POT_MSG_QOS0 0
 #define POT_MSG_QOS1 1
 #define POT_MSG_QOS2 2
@@ -30,7 +31,8 @@
 #define POT_MSG_MAX_RETRY 2
 #define POT_MSG_RETRY_BASE_MS 50u
 
-/* 消息（56 字节定长） */
+/* 消息（定长：头 28B + 内联负载 POT_MSG_INLINE；MCP 环 8 条与 msgdemo
+ * 环 32 条的 RAM 预算按此核算——改 POT_MSG_INLINE 需同步估 bss 增量） */
 typedef struct {
     uint32_t id;         /* 发送方单调递增，重发保号（去重键之一） */
     uint32_t seq;        /* 通道内时序号，入队时分配（丢失/乱序检测） */

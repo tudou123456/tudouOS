@@ -14,12 +14,21 @@
 
 /*
  * MCP 适配器实现：代理任务 + 消息基座通道 + JSON-RPC 工具分发。
- * 工具：ping / echo / sysinfo / tools/list / fs.list / fs.read / fs.write。
+ *
+ * 协议面（D-20 后）：
+ *   - initialize / notifications/initialized 握手（protocolVersion 2025-06-18）
+ *   - tools/list 返回规范 {tools:[{name,description,inputSchema}]}
+ *   - tools/call 按 {name, arguments} 分发，result 走 {content:[...],isError}
+ *   - id 三态原样回显（数字/字符串），无 id = notification 不回包
+ *   - 兼容旧直连形态：method 直接写工具名（params 即参数，result 为工具对象）
+ *
+ * 已知边界：UART 行传输与控制台共享串口，流里混有回显与 "potato> "
+ * 提示符——严格按 stdio 逐行解析 JSON 的客户端需要过滤非 JSON 行
+ * （D-20 ④，独占传输/帧标识留待后续里程碑）。
  */
 
 #define MCP_CH_CAP 8u
-#define MCP_LINE_MAX 192
-#define MCP_RESP_MAX 400
+#define MCP_RESP_MAX 512
 
 static pot_channel_t g_ch;
 static pot_msg_t g_ring[MCP_CH_CAP];
@@ -47,8 +56,8 @@ int mcp_submit_line(const char *line, uint32_t len)
     if (!g_ch_ready) {
         return 1;
     }
-    if (len > MCP_LINE_MAX) {
-        len = MCP_LINE_MAX;
+    if (len > POT_MSG_INLINE) {
+        return 2; /* 超长拒绝（显式报错由控制台转出，不再静默截断） */
     }
     static uint32_t seq = 0; /* 每行独立 id——去重窗口按 (发送方,id) 拦截重复 */
     seq++;
@@ -58,10 +67,9 @@ int mcp_submit_line(const char *line, uint32_t len)
     m.type = 1;
     m.qos = POT_MSG_QOS0;
     m.len = (uint16_t)len;
-    for (volatile uint32_t i = 0; i < len && i < POT_MSG_INLINE; i++) {
+    for (volatile uint32_t i = 0; i < len; i++) {
         m.data[i] = (uint8_t)line[i];
     }
-    /* 行超长走 QoS0 截断（通道投递语义） */
     return pot_msg_send(&g_ch, &m, 50u) != 0 ? 1 : 0;
 }
 
@@ -189,6 +197,7 @@ static void tool_fs_read(rbuild_t *b, const pot_json_t *params)
     rstr(b, "name", nm->str);
     rnum(b, "size", n);
     rstr(b, "data", buf);
+    rnum(b, "truncated", (long)((uint32_t)n == potfs_size(nm->str) ? 0 : 1));
 }
 
 static void tool_fs_write(rbuild_t *b, const pot_json_t *params)
@@ -215,110 +224,322 @@ static void tool_fs_write(rbuild_t *b, const pot_json_t *params)
 typedef struct {
     const char *name;
     void (*fn)(rbuild_t *, const pot_json_t *);
+    const char *desc;
+    const char *props;    /* inputSchema.properties 内文（可为空串） */
+    const char *required; /* required 数组内文（可为空串=无必填） */
 } mcp_tool_t;
 
 static const mcp_tool_t g_tools[] = {
-    { "ping", tool_ping },
-    { "echo", tool_echo },
-    { "sysinfo", tool_sysinfo },
-    { "tools/list", 0 },   /* 特判 */
-    { "fs.list", tool_fs_list },
-    { "fs.read", tool_fs_read },
-    { "fs.write", tool_fs_write },
+    { "ping", tool_ping, "liveness probe: returns kernel tick",
+      "", "" },
+    { "echo", tool_echo, "echo back the text parameter",
+      "\"text\":{\"type\":\"string\"}", "\"text\"" },
+    { "sysinfo", tool_sysinfo, "kernel name/version/uptime/heap snapshot",
+      "", "" },
+    { "fs.list", tool_fs_list, "list potfs files: count and total bytes",
+      "", "" },
+    { "fs.read", tool_fs_read, "read a potfs file by name (144B window, truncated flag)",
+      "\"name\":{\"type\":\"string\"}", "\"name\"" },
+    { "fs.write", tool_fs_write, "write (replace) a potfs file by name",
+      "\"name\":{\"type\":\"string\"},"
+      "\"data\":{\"type\":\"string\"}", "\"name\",\"data\"" },
 };
 #define N_TOOLS ((int)(sizeof(g_tools) / sizeof(g_tools[0])))
 
-/* ---------- 响应输出 ---------- */
+/* ---------- id 三态与响应输出 ---------- */
 
-static void send_result(long id, pot_json_t *result_children)
+typedef struct {
+    int present;      /* 0 = notification（无 id，不回包） */
+    int is_str;
+    long num;
+    const char *str;  /* 指向请求树内字符串，生命周期随请求树 */
+} jid_t;
+
+/* 把 JSON 字符串值转义嵌入（含控制字符） */
+static void escape_into(char *dst, uint32_t cap, const char *s)
 {
+    uint32_t o = 0;
+    for (uint32_t i = 0; s[i] != '\0' && o + 7 < cap; i++) {
+        char ch = s[i];
+        if (ch == '"' || ch == '\\') {
+            dst[o++] = '\\';
+            dst[o++] = ch;
+        } else if ((unsigned char)ch < 0x20u) {
+            static const char hex[] = "0123456789abcdef";
+            dst[o++] = '\\';
+            dst[o++] = 'u';
+            dst[o++] = '0';
+            dst[o++] = '0';
+            dst[o++] = hex[((unsigned char)ch >> 4) & 0xF];
+            dst[o++] = hex[(unsigned char)ch & 0xF];
+        } else {
+            dst[o++] = ch;
+        }
+    }
+    dst[o] = '\0';
+}
+
+static void u32_to_dec(char *dst, uint32_t v)
+{
+    char tmp[10];
+    int n = 0;
+    do {
+        tmp[n++] = (char)('0' + (v % 10u));
+        v /= 10u;
+    } while (v != 0u);
+    for (int i = 0; i < n; i++) {
+        dst[i] = tmp[n - 1 - i];
+    }
+    dst[n] = '\0';
+}
+
+/* 渲染 id 片段："null" / 数字 / 带引号转义字符串 */
+static void render_id(const jid_t *id, char *out, uint32_t cap)
+{
+    if (id == 0 || !id->present) {
+        out[0] = 'n';
+        out[1] = 'u';
+        out[2] = 'l';
+        out[3] = 'l';
+        out[4] = '\0';
+        return;
+    }    if (id->is_str) {
+        out[0] = '"';
+        escape_into(out + 1, cap - 2, id->str != 0 ? id->str : "");
+        uint32_t n = 0;
+        while (out[n] != '\0') {
+            n++;
+        }
+        out[n] = '"';
+        out[n + 1] = '\0';
+        return;
+    }
+    uint32_t v = (id->num < 0) ? (uint32_t)(-(id->num + 1)) + 1u : (uint32_t)id->num;
+    if (id->num < 0) {
+        out[0] = '-';
+        u32_to_dec(out + 1, v);
+    } else {
+        u32_to_dec(out, v);
+    }
+}
+
+static void send_raw_result(const jid_t *id, const char *body_json)
+{
+    if (id != 0 && !id->present) {
+        return; /* notification：不回包（id==0 仅用于 parse error 的 id:null） */
+    }
+    char ids[80];
+    render_id(id, ids, sizeof(ids));
+    potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":%s}\r\n",
+                  ids, body_json);
+}
+
+static void send_raw_error(const jid_t *id, int code, const char *msg)
+{
+    if (id != 0 && !id->present) {
+        return; /* notification：不回包 */
+    }
+    char ids[80];
+    render_id(id, ids, sizeof(ids));
+    potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,"
+                  "\"error\":{\"code\":%d,\"message\":\"%s\"}}\r\n",
+                  ids, code, msg);
+}
+
+/* 兼容旧直连形态：result 是工具子节点链（对象） */
+static void send_tree_result(const jid_t *id, pot_json_t *result_children)
+{
+    if (id != 0 && !id->present) {
+        pot_json_free(result_children); /* notification：树释放责任在此 */
+        return;
+    }
     pot_json_t res = { POT_JSON_OBJ, 0, 0, 0, result_children, 0 };
     char body[MCP_RESP_MAX];
     size_t n = pot_json_write(&res, body, sizeof(body));
     if (n == 0) {
-        potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%d,"
-                      "\"error\":{\"code\":-32603,\"message\":\"result too large\"}}\r\n",
-                      (int)id);
+        send_raw_error(id, -32603, "result too large");
         return;
     }
-    potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":%s}\r\n",
-                  (int)id, body);
+    send_raw_result(id, body);
 }
 
-static void send_error(long id, int code, const char *msg)
+/* ---------- 协议方法 ---------- */
+
+static void send_initialize(const jid_t *id)
 {
-    potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%d,"
-                  "\"error\":{\"code\":%d,\"message\":\"%s\"}}\r\n",
-                  (int)id, code, msg);
+    if (id != 0 && !id->present) {
+        return;
+    }
+    char ids[80];
+    render_id(id, ids, sizeof(ids));
+    potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{"
+                  "\"protocolVersion\":\"2025-06-18\","
+                  "\"capabilities\":{\"tools\":{\"listChanged\":false}},"
+                  "\"serverInfo\":{\"name\":\"%s\",\"version\":\"%s\"},"
+                  "\"instructions\":\"tudouOS kernel MCP over UART lines; "
+                  "filter non-JSON console lines.\"}}}\r\n",
+                  ids, POTATO_NAME, POTATO_VERSION);
 }
+
+static void send_tools_list(const jid_t *id)
+{
+    if (id != 0 && !id->present) {
+        return;
+    }
+    char ids[80];
+    render_id(id, ids, sizeof(ids));
+    potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"tools\":[",
+                  ids);
+    for (int i = 0; i < N_TOOLS; i++) {
+        potato_printf("%s{\"name\":\"%s\",\"description\":\"%s\","
+                      "\"inputSchema\":{\"type\":\"object\","
+                      "\"properties\":{%s}%s%s%s}}",
+                      i != 0 ? "," : "",
+                      g_tools[i].name, g_tools[i].desc, g_tools[i].props,
+                      g_tools[i].required[0] != '\0' ? ",\"required\":[" : "",
+                      g_tools[i].required,
+                      g_tools[i].required[0] != '\0' ? "]" : "");
+    }
+    potato_printf("]}}\r\n");
+}
+
+/* tools/call：工具结果序列化后按 MCP content 形态回传 */
+static void send_tools_call(const jid_t *id, rbuild_t *b)
+{
+    if (id != 0 && !id->present) {
+        return;
+    }
+    char body[MCP_RESP_MAX];
+    if (b->ok) {
+        pot_json_t res = { POT_JSON_OBJ, 0, 0, 0, b->first, 0 };
+        if (pot_json_write(&res, body, sizeof(body)) == 0) {
+            send_raw_error(id, -32603, "result too large");
+            return;
+        }
+        char esc[2 * MCP_RESP_MAX];
+        escape_into(esc, sizeof(esc), body);
+        char ids[80];
+        render_id(id, ids, sizeof(ids));
+        potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{"
+                      "\"content\":[{\"type\":\"text\",\"text\":\"%s\"}]}}\r\n",
+                      ids, esc);
+    } else {
+        char ids[80];
+        render_id(id, ids, sizeof(ids));
+        potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{"
+                      "\"content\":[{\"type\":\"text\","
+                      "\"text\":\"tool failed\"},"
+                      "{\"type\":\"text\",\"text\":\"check params\"}],"
+                      "\"isError\":true}}\r\n", ids);
+    }
+}
+
+/* ---------- 请求分发 ---------- */
 
 static void handle_line(const char *line)
 {
     pot_json_t *req = pot_json_parse(line);
     if (req == 0 || req->type != POT_JSON_OBJ) {
-        send_error(0, -32700, "parse error");
+        send_raw_error(0, -32700, "parse error"); /* 无法定位 id → id:null */
         if (req != 0) {
             pot_json_free(req);
         }
         return;
     }
 
-    const pot_json_t *jid = pot_json_get(req, "id");
-    long id = (jid != 0 && jid->type == POT_JSON_NUM) ? jid->num : 0;
+    /* id 三态：数字/字符串原样回显；缺失 = notification，不回包 */
+    jid_t jid = { 0, 0, 0, 0 };
+    const pot_json_t *jid_node = pot_json_get(req, "id");
+    if (jid_node != 0) {
+        if (jid_node->type == POT_JSON_NUM) {
+            jid.present = 1;
+            jid.num = jid_node->num;
+        } else if (jid_node->type == POT_JSON_STR && jid_node->str != 0) {
+            jid.present = 1;
+            jid.is_str = 1;
+            jid.str = jid_node->str;
+        } else {
+            pot_json_free(req);
+            send_raw_error(0, -32600, "invalid request: bad id"); /* id 非法 → id:null */
+            return;
+        }
+    }
 
     const pot_json_t *jm = pot_json_get(req, "method");
     if (jm == 0 || jm->type != POT_JSON_STR || jm->str == 0) {
         pot_json_free(req);
-        send_error(id, -32600, "invalid request");
+        if (jid.present) {
+            send_raw_error(&jid, -32600, "invalid request");
+        }
         return;
     }
     const pot_json_t *params = pot_json_get(req, "params");
 
+    /* ---- MCP 协议方法 ---- */
+    if (strcmp(jm->str, "initialize") == 0) {
+        pot_json_free(req);
+        send_initialize(&jid);
+        return;
+    }
+    if (strcmp(jm->str, "notifications/initialized") == 0) {
+        pot_json_free(req);
+        return; /* notification：静默（即使误带 id 也不回包） */
+    }
     if (strcmp(jm->str, "tools/list") == 0) {
+        pot_json_free(req);
+        send_tools_list(&jid);
+        return;
+    }
+    if (strcmp(jm->str, "tools/call") == 0) {
+        const pot_json_t *jn = (params != 0) ? pot_json_get(params, "name") : 0;
+        const pot_json_t *ja = (params != 0) ? pot_json_get(params, "arguments") : 0;
+        if (jn == 0 || jn->type != POT_JSON_STR || jn->str == 0) {
+            pot_json_free(req);
+            send_raw_error(&jid, -32602, "invalid params: tools/call needs name");
+            return;
+        }
+        int found = -1;
+        for (int i = 0; i < N_TOOLS; i++) {
+            if (strcmp(jn->str, g_tools[i].name) == 0) {
+                found = i;
+                break;
+            }
+        }
+        if (found < 0) {
+            pot_json_free(req);
+            send_raw_error(&jid, -32602, "unknown tool");
+            return;
+        }
         rbuild_t b = { 0, 0, 1 };
         b.tail = &b.first;
-        rstr(&b, "transport", "uart-line");
-        rstr(&b, "substrate", "potato-msg-v1");
-        char list[160];
-        uint32_t li = 0;
-        list[0] = '\0';
-        for (volatile int i = 0; i < N_TOOLS; i++) {
-            uint32_t k = 0;
-            while (g_tools[i].name[k] != '\0' && li < sizeof(list) - 2) {
-                list[li++] = g_tools[i].name[k++];
-            }
-            if (i < N_TOOLS - 1 && li < sizeof(list) - 2) {
-                list[li++] = ',';
-            }
-        }
-        list[li] = '\0';
-        rstr(&b, "tools", list);
-        if (b.ok) {
-            send_result(id, b.first);
-        }
-        pot_json_free(b.first);
+        g_tools[found].fn(&b, ja); /* arguments 作为参数对象 */
         pot_json_free(req);
+        send_tools_call(&jid, &b);
+        pot_json_free(b.first);
         return;
     }
 
+    /* ---- 兼容旧直连形态：method 即工具名，params 即参数 ---- */
     for (volatile int i = 0; i < N_TOOLS; i++) {
-        if (g_tools[i].fn != 0 && strcmp(jm->str, g_tools[i].name) == 0) {
+        if (strcmp(jm->str, g_tools[i].name) == 0) {
             rbuild_t b = { 0, 0, 1 };
             b.tail = &b.first;
             g_tools[i].fn(&b, params);
+            pot_json_free(req);
             if (b.ok) {
-                send_result(id, b.first);
+                send_tree_result(&jid, b.first);
             } else {
-                send_error(id, -32000, "tool failed");
+                send_raw_error(&jid, -32000, "tool failed");
             }
             pot_json_free(b.first);
-            pot_json_free(req);
             return;
         }
     }
 
     pot_json_free(req);
-    send_error(id, -32601, "method not found");
+    if (jid.present) {
+        send_raw_error(&jid, -32601, "method not found");
+    }
 }
 
 static void mcp_agent(void *arg)

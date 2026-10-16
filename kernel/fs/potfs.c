@@ -55,64 +55,39 @@ int potfs_write(const char *name, const char *buf, uint32_t len)
         return -1;
     }
 
+    /* D-25 写时复制：先备好新缓冲，任何失败路径都不动旧文件状态 */
+    uint8_t *nd = 0;
+    if (len != 0u) {
+        nd = (uint8_t *)pot_heap_alloc(len, FS_TAG);
+        if (nd == 0) {
+            return -1; /* 分配失败：旧内容原样保留 */
+        }
+        for (volatile uint32_t i = 0; i < len; i++) {
+            nd[i] = (uint8_t)buf[i];
+        }
+    }
+
     potfs_file_t *f = find_slot(name);
     if (f == 0) {
         f = find_free();
         if (f == 0) {
-            return -1; /* 表满 */
+            if (nd != 0) {
+                pot_heap_free(nd);
+            }
+            return -1; /* 表满：旧内容不受影响 */
         }
         f->used = 1u;
         for (volatile uint32_t i = 0; i <= n; i++) {
             f->name[i] = name[i];
         }
         f->data = 0;
-        f->size = 0u;
-    }
-    if (f->data != 0) {
-        pot_heap_free(f->data);
-        f->data = 0;
-    }
-    if (len != 0u) {
-        f->data = (uint8_t *)pot_heap_alloc(len, FS_TAG);
-        if (f->data == 0) {
-            f->used = 0u;
-            f->name[0] = '\0';
-            return -1;
-        }
-        for (volatile uint32_t i = 0; i < len; i++) {
-            f->data[i] = (uint8_t)buf[i];
-        }
-    }
-    f->size = len;
-    return (int)len;
-}
-
-int potfs_append(const char *name, const char *buf, uint32_t len)
-{
-    potfs_file_t *f = find_slot(name);
-    if (f == 0) {
-        return potfs_write(name, buf, len);
-    }
-    uint32_t nsz = f->size + len;
-    uint8_t *nd = 0;
-    if (nsz != 0u) {
-        nd = (uint8_t *)pot_heap_alloc(nsz, FS_TAG);
-        if (nd == 0) {
-            return -1;
-        }
-        for (uint32_t i = 0; i < f->size; i++) {
-            nd[i] = f->data[i];
-        }
-        for (volatile uint32_t i = 0; i < len; i++) {
-            nd[f->size + i] = (uint8_t)buf[i];
-        }
     }
     if (f->data != 0) {
         pot_heap_free(f->data);
     }
     f->data = nd;
-    f->size = nsz;
-    return (int)nsz;
+    f->size = len;
+    return (int)len;
 }
 
 int potfs_read(const char *name, char *buf, uint32_t maxlen)
@@ -126,6 +101,12 @@ int potfs_read(const char *name, char *buf, uint32_t maxlen)
         buf[i] = (char)f->data[i];
     }
     return (int)n;
+}
+
+uint32_t potfs_size(const char *name)
+{
+    potfs_file_t *f = find_slot(name);
+    return (f != 0) ? f->size : 0u;
 }
 
 int potfs_delete(const char *name)

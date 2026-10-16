@@ -91,8 +91,17 @@ def check_toolchain_versions(cc):
         print(f"警告: 工具链版本 {m.group(1)} != 实测基线 13.2.0，"
               "QEMU 相关测试容差可能失真")
     qemu = envlib.find_qemu()
-    if qemu and "esp-develop" not in qemu:
-        print(f"警告: QEMU 非乐鑫分支构建（{qemu}），已知六坑假设可能不成立")
+    if qemu:
+        # 版本目录可能在可执行文件的任一上级（third_party/qemu/<ver>/bin/..）
+        p = qemu
+        esp_branch = False
+        for _ in range(5):
+            p = os.path.dirname(p)
+            if "esp-develop" in p or "esp-release" in p:
+                esp_branch = True
+                break
+        if not esp_branch:
+            print(f"警告: QEMU 非乐鑫分支构建（{qemu}），已知六坑假设可能不成立")
 
 
 def want_clean():

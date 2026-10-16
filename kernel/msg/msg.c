@@ -39,9 +39,8 @@ int pot_channel_init(pot_channel_t *ch, const char *name,
 }
 
 /* ---------- 窗口操作 ----------
- * 注意：扫描循环用 volatile 索引——禁掉 GCC 的零开销 loop 指令优化。
- * 该 QEMU 在任务切换/手动异常退出后 loop 指令行为异常（M2 时代 strcmp
- * 非法指令崩溃、本里程碑扫描函数随机命中皆同源）。 */
+ * 扫描循环的 volatile 索引为历史纪律（E-01 已证伪 "QEMU 不支持 loop"，
+ * 见 lib_shim.c 注释），保留无害。 */
 
 static int dedup_hit(const pot_channel_t *ch, pot_task_t *s, uint32_t id)
 {
@@ -75,7 +74,9 @@ static int acked_hit(const pot_channel_t *ch, pot_task_t *s, uint32_t id)
 /* 返回：0=入队 1=重复（幂等跳过） 2=满（需阻塞等空间） 3=QoS0 丢新 */
 static int enq(pot_channel_t *ch, pot_msg_t *m)
 {
-    if (dedup_hit(ch, m->sender, m->id)) {
+    /* D-01：去重只对 QoS1/2 有意义（存在重发路径）；QoS0 无重发，
+     * 去重只能误杀合法新消息（历史上 id 未赋值时曾整通道瘫痪） */
+    if (m->qos != POT_MSG_QOS0 && dedup_hit(ch, m->sender, m->id)) {
         ch->c_drop_dedup++;
         trace_push(TR_MSG_DROP, (uint32_t)ch, 3);
         return 1; /* 重发且原消息已入队：幂等 */

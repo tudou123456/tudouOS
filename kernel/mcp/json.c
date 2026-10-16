@@ -36,25 +36,134 @@ static pot_json_t *jnew(uint8_t type)
     return v;
 }
 
+/* 迭代化（D-07/D-19）：next 兄弟链循环处理（长度只受输入行限制），
+ * child 深度由解析侧 JSON_MAX_DEPTH=8 封顶，递归栈深有界 */
 void pot_json_free(pot_json_t *v)
 {
-    if (v == 0) {
-        return;
+    while (v != 0) {
+        pot_json_t *next = v->next;
+        pot_json_free(v->child);
+        if (v->key != 0) {
+            pot_heap_free(v->key);
+        }
+        if (v->str != 0) {
+            pot_heap_free(v->str);
+        }
+        pot_heap_free(v);
+        v = next;
     }
-    pot_json_free(v->child);
-    pot_json_free(v->next);
-    if (v->key != 0) {
-        pot_heap_free(v->key);
-    }
-    if (v->str != 0) {
-        pot_heap_free(v->str);
-    }
-    pot_heap_free(v);
 }
 
 /* ---------- 解析 ---------- */
 
 static pot_json_t *parse_value(jctx_t *c);
+
+/* 读 4 位十六进制（\uXXXX 用），成功时前移 *pp 并返回码点 */
+static int hex4(const char **pp, uint32_t *out)
+{
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) {
+        char ch = (*pp)[i];
+        uint32_t d;
+        if (ch >= '0' && ch <= '9') {
+            d = (uint32_t)(ch - '0');
+        } else if (ch >= 'a' && ch <= 'f') {
+            d = (uint32_t)(ch - 'a') + 10u;
+        } else if (ch >= 'A' && ch <= 'F') {
+            d = (uint32_t)(ch - 'A') + 10u;
+        } else {
+            return 0;
+        }
+        v = (v << 4) | d;
+    }
+    *pp += 4;
+    *out = v;
+    return 1;
+}
+
+/* UTF-8 编码码点，返回写入字节数（1..4；调用方保证容量） */
+static int utf8_put(char *dst, uint32_t cp)
+{
+    if (cp < 0x80u) {
+        dst[0] = (char)cp;
+        return 1;
+    }
+    if (cp < 0x800u) {
+        dst[0] = (char)(0xC0u | (cp >> 6));
+        dst[1] = (char)(0x80u | (cp & 0x3Fu));
+        return 2;
+    }
+    if (cp < 0x10000u) {
+        dst[0] = (char)(0xE0u | (cp >> 12));
+        dst[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        dst[2] = (char)(0x80u | (cp & 0x3Fu));
+        return 3;
+    }
+    dst[0] = (char)(0xF0u | (cp >> 18));
+    dst[1] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+    dst[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+    dst[3] = (char)(0x80u | (cp & 0x3Fu));
+    return 4;
+}
+
+static int utf8_len(uint32_t cp)
+{
+    if (cp < 0x80u) {
+        return 1;
+    }
+    if (cp < 0x800u) {
+        return 2;
+    }
+    if (cp < 0x10000u) {
+        return 3;
+    }
+    return 4;
+}
+
+/* 解析 \uXXXX（含代理对合成）。失败返回 0（非法转义按 RFC 8259 拒绝）。
+ * 成功时 *pp 前移、*cp 输出码点。 */
+static int parse_unicode_escape(const char **pp, uint32_t *cp)
+{
+    if (!hex4(pp, cp)) {
+        return 0;
+    }
+    if (*cp >= 0xD800u && *cp <= 0xDBFFu) { /* 高代理：必须跟 \uDC00-DFFF */
+        const char *r = *pp; /* 此处指向低代理转义的 '\\' */
+        if (r[0] == '\\' && r[1] == 'u') {
+            const char *h = r + 2; /* 跳过 \u 前缀再读 4 位十六进制 */
+            uint32_t lo;
+            if (hex4(&h, &lo) && lo >= 0xDC00u && lo <= 0xDFFFu) {
+                *cp = 0x10000u + ((*cp - 0xD800u) << 10) + (lo - 0xDC00u);
+                *pp = h;
+                return 1;
+            }
+        }
+        return 0; /* 孤立高代理（或低代理非法） */
+    }
+    if (*cp >= 0xDC00u && *cp <= 0xDFFFu) {
+        return 0; /* 孤立低代理 */
+    }
+    return 1;
+}
+
+/* 转义字符集合（\u 单独处理） */
+static int is_known_escape(char ch)
+{
+    return ch == 'b' || ch == 'f' || ch == 'n' || ch == 'r' || ch == 't' ||
+           ch == '"' || ch == '\\' || ch == '/';
+}
+
+static char escape_value(char ch)
+{
+    switch (ch) {
+    case 'b': return '\b';
+    case 'f': return '\f';
+    case 'n': return '\n';
+    case 'r': return '\r';
+    case 't': return '\t';
+    default:  return ch; /* " \\ / */
+    }
+}
 
 static char *parse_string_raw(jctx_t *c)
 {
@@ -62,7 +171,7 @@ static char *parse_string_raw(jctx_t *c)
         return 0;
     }
     c->p++;
-    /* 先数长度（含转义折算） */
+    /* 第一趟：折算转义后的 UTF-8 字节数，并整体校验转义合法性 */
     uint32_t n = 0;
     const char *q = c->p;
     while (*q != '"' && *q != '\0') {
@@ -71,6 +180,21 @@ static char *parse_string_raw(jctx_t *c)
             if (*q == '\0') {
                 return 0;
             }
+            if (*q == 'u') {
+                q++;
+                uint32_t cp;
+                if (!parse_unicode_escape(&q, &cp)) {
+                    return 0;
+                }
+                n += (uint32_t)utf8_len(cp);
+                continue;
+            }
+            if (!is_known_escape(*q)) {
+                return 0; /* 未知转义：RFC 8259 拒绝 */
+            }
+            n++;
+            q++;
+            continue;
         }
         q++;
         n++;
@@ -82,24 +206,26 @@ static char *parse_string_raw(jctx_t *c)
     if (s == 0) {
         return 0;
     }
+    /* 第二趟：按第一趟的折算规则拷贝 */
     uint32_t i = 0;
-    while (*c->p != '"' && *c->p != '\0' && i < n) {
+    while (*c->p != '"' && i < n) {
         char ch = *c->p;
         if (ch == '\\') {
             c->p++;
-            switch (*c->p) {
-            case 'n': ch = '\n'; break;
-            case 't': ch = '\t'; break;
-            case 'r': ch = '\r'; break;
-            case '"': ch = '"'; break;
-            case '\\': ch = '\\'; break;
-            case '/': ch = '/'; break;
-            default: ch = *c->p; break;
+            if (*c->p == 'u') {
+                c->p++;
+                uint32_t cp;
+                if (!parse_unicode_escape(&c->p, &cp)) {
+                    pot_heap_free(s);
+                    return 0; /* 理论不可达：第一趟已校验 */
+                }
+                i += (uint32_t)utf8_put(&s[i], cp);
+                continue;
             }
+            ch = escape_value(*c->p);
         }
         s[i] = ch;
         i++;
-        asm volatile("" ::: "memory"); /* 编译器屏障禁 doloop（QEMU 限制） */
         c->p++;
     }
     s[i] = '\0';

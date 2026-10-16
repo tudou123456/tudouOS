@@ -3,6 +3,7 @@
 expect() 从上次匹配结束的位置向后搜索，避免跨用例/跨步骤重复匹配旧输出。
 """
 
+import codecs
 import re
 import socket
 import threading
@@ -24,6 +25,8 @@ class SerialTap:
         self._sock = None
         self._thread = None
         self._line_buf = ""
+        # 增量 UTF-8 解码：多字节字符跨 TCP 分块边界不坏（D-19 验证依赖）
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
     def connect(self, wait_secs=20.0):
         deadline = time.monotonic() + wait_secs
@@ -53,7 +56,7 @@ class SerialTap:
                 break
             now = time.monotonic()
             with self._cv:
-                chunk = data.decode("utf-8", errors="replace")
+                chunk = self._decoder.decode(data)
                 self.text += chunk
                 self._line_buf += chunk
                 while "\n" in self._line_buf:
