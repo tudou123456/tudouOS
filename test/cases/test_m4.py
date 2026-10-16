@@ -112,3 +112,33 @@ def test_mem_trace(ctx):
         except Exception:
             break
     assert {"MEM_ALLOC", "MEM_FREE"} <= kinds, f"内存事件缺失: {kinds}"
+
+
+def test_heap_double_free(ctx):
+    """D-06 回归：合并后旧地址二次释放被墓碑捕获，堆不出现重叠空闲块。"""
+    ctx.serial.expect(READY_LINE, timeout=20)
+    ctx.serial.send("memtest dblfree")
+    m = ctx.serial.expect(r"\[POTATO\]\[MEM\] DBLFREE-CAPTURED faults=(\d+)\(\+(\d+)\) "
+                          r"free=(\d+) largest=(\d+)", timeout=15)
+    assert int(m.group(2)) == 1, f"二次释放未被捕获: +{m.group(2)}"
+    assert int(m.group(4)) > 0, "堆回收异常（largest=0）"
+    # 堆必须仍然自洽：selftest 复验 + 系统存活
+    ctx.serial.send("memtest selftest 16")
+    ctx.serial.expect(r"\[POTATO\]\[MEM\] SELFTEST-PASS n=16", timeout=15)
+    ctx.serial.send("ping")
+    ctx.serial.expect(r"pong", timeout=10)
+
+
+def test_heap_size_corrupt(ctx):
+    """D-05 回归：块头 size 被砸后释放——隔离（泄漏）而非越界写/坏表。"""
+    ctx.serial.expect(READY_LINE, timeout=20)
+    ctx.serial.send("memtest szcorrupt")
+    m = ctx.serial.expect(r"\[POTATO\]\[MEM\] SZCORRUPT-QUARANTINED faults=(\d+)\(\+(\d+)\) "
+                          r"used=(\d+)", timeout=15)
+    assert int(m.group(2)) == 1, f"头破坏未被捕获: +{m.group(2)}"
+    assert int(m.group(3)) > 0, "被隔离块应泄漏（used 不得下溢/异常清零）"
+    # 系统存活且堆自洽
+    ctx.serial.send("memtest selftest 16")
+    ctx.serial.expect(r"\[POTATO\]\[MEM\] SELFTEST-PASS n=16", timeout=15)
+    ctx.serial.send("ping")
+    ctx.serial.expect(r"pong", timeout=10)

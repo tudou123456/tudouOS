@@ -17,6 +17,7 @@ extern char _heap_start[], _heap_end[];
 
 #define H_MAGIC_ALLOC 0xA110CA7Eu
 #define H_MAGIC_FREE  0xF7EE810Cu
+#define H_MAGIC_DEAD  0xDEAD810Cu /* 墓碑：被吞并/隔离的块头，防二次释放（D-06） */
 #define H_CANARY_BASE 0xC0FFEE42u
 
 #define H_ALIGN     8u
@@ -104,21 +105,26 @@ static void free_remove(hblock_t *b)
     }
 }
 
-/* 首适配：从 need 桶起向上找首个足够块 */
+/* 首适配：位图定位起始桶以上的首个非空桶，桶内首适配（D-24：位图真正
+ * 参与查找，不再只写不读） */
 static hblock_t *find_block(uint32_t need)
 {
     uint32_t start = bucket_of(need);
-    for (volatile uint32_t i = start; i < H_NBUCKETS; i++) {
-        if ((g_bucket[i]) == 0) {
-            continue;
-        }
-        hblock_t *b = g_bucket[i];
-        while (b != 0) {
-            if (b->size >= need) {
-                return b;
+    uint32_t bm = g_bitmap >> start; /* 丢弃起始桶以下的位 */
+    while (bm != 0) {
+        if ((bm & 1u) != 0u) {
+            /* 桶号 = start + 已跳过的空桶数（位图与桶链同步维护） */
+            uint32_t i = start;
+            hblock_t *b = g_bucket[i];
+            while (b != 0) {
+                if (b->size >= need) {
+                    return b;
+                }
+                b = b->next;
             }
-            b = b->next;
         }
+        start++;
+        bm >>= 1;
     }
     return 0;
 }
@@ -173,6 +179,11 @@ void *pot_heap_alloc(uint32_t size, uint32_t tag)
     if (size == 0u) {
         size = 1u;
     }
+    /* D-21：先拒绝超大请求，杜绝 payload/need 圆整回绕返回小块的路径 */
+    if (size > 0x7FFF0000u) {
+        g_stat.n_fail++;
+        return 0;
+    }
     uint32_t payload = (size + H_ALIGN - 1u) & ~(H_ALIGN - 1u);
     uint32_t need = H_HDR + payload + H_FOOT;
     if (need < H_MIN_BLOCK) {
@@ -212,15 +223,30 @@ void pot_heap_free(void *ptr)
     if (b->magic != H_MAGIC_ALLOC) {
         g_stat.n_fault++;
         trace_push(TR_MEM_FAULT, 2 /* bad-free */, b->tag);
-        return; /* 非法/重复释放：吞掉并计数 */
+        return; /* 非法/重复释放：吞掉并计数（DEAD 墓碑也落在此） */
     }
 
+    /* D-05：size 是下越界写最先命中的头字段（magic 可完好），不可盲信。
+     * 头完整性不过关即隔离：块永久泄漏，绝不参与合并/入表。 */
+    if (b->size < H_MIN_BLOCK || (b->size & (H_ALIGN - 1u)) != 0u ||
+        (uint8_t *)b + b->size > g_heap_hi) {
+        g_stat.n_fault++;
+        trace_push(TR_MEM_FAULT, 4 /* header corrupt */, b->tag);
+        b->magic = H_MAGIC_DEAD;
+        return;
+    }
+
+    uint32_t tag_saved = b->tag; /* D-24：释放事件保留来源标签 */
     hfoot_t *f = foot_of(b);
     if (f->canary != canary_of(b) || f->self != b) {
         g_stat.n_fault++;
         trace_push(TR_MEM_FAULT, 1 /* overflow */, b->tag);
-        /* footer 被踩：头信息仍可信（尺寸来自头），继续回收 */
+        /* footer 被踩但头校验已过：尺寸可信，重建 footer 后继续回收 */
     }
+
+    /* D-06：置墓碑——后续与上邻合并时本头将成为合并块内部字节，
+     * 旧地址二次 free 会命中 DEAD 而非残留的 ALLOC */
+    b->magic = H_MAGIC_DEAD;
 
     uint32_t asize = b->size; /* 原块尺寸：记账用（合并前） */
     uint32_t bsize = b->size;
@@ -234,12 +260,16 @@ void pot_heap_free(void *ptr)
         bsize += n->size;
     }
 
-    /* 合并上一个空闲邻块（上块的 footer 自指校验） */
+    /* 合并上一个空闲邻块（上块的 footer 自指校验；D-22：解引用前双端校验） */
     if ((uint8_t *)b - H_FOOT >= g_heap_lo) {
         hfoot_t *pf = (hfoot_t *)((uint8_t *)b - H_FOOT);
         hblock_t *pb = pf->self;
-        if ((uint8_t *)pb >= g_heap_lo && pb->magic == H_MAGIC_FREE &&
-            foot_of(pb)->self == pb && (uint8_t *)pb + pb->size == (uint8_t *)b) {
+        if ((uint8_t *)pb >= g_heap_lo &&
+            (uint8_t *)pb + (uint32_t)sizeof(hblock_t) <= g_heap_hi &&
+            pb->magic == H_MAGIC_FREE &&
+            pb->size >= H_MIN_BLOCK && (pb->size & (H_ALIGN - 1u)) == 0u &&
+            (uint8_t *)pb + pb->size <= g_heap_hi &&
+            (uint8_t *)pb + pb->size == (uint8_t *)b) {
             free_remove(pb);
             pb->size += bsize;
             b = pb;
@@ -256,7 +286,7 @@ void pot_heap_free(void *ptr)
 
     g_stat.used -= asize;
     g_stat.n_free++;
-    trace_push(TR_MEM_FREE, bsize, b->tag);
+    trace_push(TR_MEM_FREE, bsize, tag_saved);
 }
 
 void pot_heap_getstat(pot_heap_stat_t *out)
