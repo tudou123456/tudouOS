@@ -1,8 +1,10 @@
 /*
- * 土豆内核上下文切换 — Xtensa call0 ABI，syscall 统一制（M3 v3）
+ * 土豆内核上下文切换 — Xtensa call0 ABI，syscall 统一制（M3 v4）
  *
- * 设计定案（v1 双帧制、v2 rfe 统一制均因该核心无可访问的 EPS1 而废弃：
- * 工具链配置未导出 eps1 名，SR194 读写实测无效——rfe 恢复的 PS 不可控）：
+ * 设计沿革：v1 双帧制、v2 rfe 统一制当年因"无可访问的 EPS1"废弃——
+ * E-02 判定实验（2026-10-16）已证伪该前提（rfe 实际从 EPC1+SR194
+ * 可控恢复，eps1 只是 binutils 未导出名字）。现行 v4 检查点制稳定
+ * 在用；rfe 路线保留给真机中断驱动抢占（D-03 接线时启用）。
  *   - 一切切换点都是 syscall（任务级：yield/sleep/exit/调度检查点）
  *   - 帧由异常入口 SAVE（88 字节），帧的 a0 槽 = syscall 的 C 返回地址
  *   - 恢复 = 恢复寄存器 + wsr.ps 常态 PS + ret.n（不需要 epc1/eps1/rfe）
@@ -13,7 +15,7 @@
  * 帧布局（与 vectors.S SAVE 一致）：
  *   +0 a0  +4 a2  +8 a3 ... +56 a15
  *   +60 sar +64 lbeg +68 lend +72 lcount
- *   +76 epc1  +80 eps1（本制不使用后两槽，保留布局一致性）
+ *   +76 epc1  +80 eps1（v4 不使用后两槽，保留布局一致性）
  */
 
 #include "task.h"
@@ -93,6 +95,13 @@ pot_do_resume:
     l32i    a3, a3, 0
     wsr.ps  a3
     esync
+    /* D-02：a3 在上面被借作 sar/lbeg/lend/lcount/PS 的暂存，此处必须
+       从帧槽 +8 重载任务参数（帧基址 a1 在下一条 addi 前仍有效）。
+       同理 a2 也在此重载（帧 +4）。退出窗口（wsr.ps 之后、ret 之前）
+       若落 level-2 IRQ：ISR 的 SAVE/RESTORE 自带对称 88B 帧，
+       call0 下 a1=帧基址仍 4 字节对齐，机械上安全（真机启用 level-1
+       抢占前需按 D-14 复核此窗口）。 */
+    l32i    a3, a1, 8
     l32i    a2, a1, 4
     addi    a1, a1, 88
     ret.n

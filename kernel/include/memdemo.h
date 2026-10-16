@@ -5,5 +5,6 @@
 void memdemo_stop(void);
 int memdemo_start(const char *mode, unsigned n);
 const char *memdemo_mode_help(void);
+void mem_cmd_dispatch(const char *mode, unsigned n);
 
 #endif /* TUDOU_MEMDEMO_H */

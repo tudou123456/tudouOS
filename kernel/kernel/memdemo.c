@@ -94,6 +94,7 @@ void memdemo_stop(void)
 
 int memdemo_start(const char *mode, unsigned n)
 {
+    (void)n; /* churn 模式不按轮数跑；参数保留给未来模式 */
     memdemo_stop();
     for (volatile int i = 0; i < 200 &&
          g_t_churn.name != 0 && g_t_churn.state != POTTASK_DEAD; i++) {

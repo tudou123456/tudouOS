@@ -20,7 +20,9 @@
 #include "trace.h"
 #include "uart.h"
 
-#define CMD_BUF_LEN 224 /* MCP JSON-RPC 单行较长 */
+#define CMD_BUF_LEN 96 /* MCP JSON-RPC 行上限。注：放大到 224 前必须先把
+                          pot_json_free 的 next 链改迭代（栈深约束，见
+                          defect-report D-07），本处保持单一定义 */
 
 /* ---------- mini printf ---------- */
 
@@ -134,8 +136,6 @@ void potato_printf(const char *fmt, ...)
 }
 
 /* ---------- 串口命令循环 ---------- */
-
-#define CMD_BUF_LEN 96
 
 static void cmd_help(void)
 {
@@ -533,6 +533,42 @@ static uint32_t loopy_sum_ref(uint32_t n)
     return sum;
 }
 
+/* ---------- D-02 回归探针：任务参数经切换链路送达 ----------
+ * 首启蹦床从帧槽 +8 取 a3；历史上 pot_do_resume 曾借 a3 作暂存导致
+ * 任务收到的是 PS 值。此处创建一个真正解引用参数的探测任务。 */
+
+static const uint32_t g_arg_magic = 0xC0FFEE42u;
+static volatile uint32_t g_arg_recv;
+static pot_task_t g_arg_tcb;
+static uint32_t g_arg_stack[256];
+
+static void arg_probe_task(void *arg)
+{
+    g_arg_recv = *(const uint32_t *)arg; /* 解引用参数（PS 值当指针用会现形） */
+    pot_task_exit();
+}
+
+static void cmd_argtest(void)
+{
+    g_arg_recv = 0;
+    if (pot_task_create(&g_arg_tcb, "arg", POTCLS_UI, arg_probe_task,
+                        (void *)&g_arg_magic, g_arg_stack,
+                        sizeof(g_arg_stack) / sizeof(uint32_t)) != 0) {
+        uart_puts("[POTATO][ARG] create failed\r\n");
+        return;
+    }
+    for (volatile int i = 0; i < 200 && g_arg_recv == 0; i++) {
+        pot_task_sleep(1); /* 等探测任务跑到（检查点调度） */
+    }
+    potato_printf("[POTATO][ARG] recv=0x%x expect=0x%x\r\n",
+                  g_arg_recv, g_arg_magic);
+    if (g_arg_recv == g_arg_magic) {
+        uart_puts("[POTATO][ARG] PASS\r\n");
+    } else {
+        uart_puts("[POTATO][ARG] FAIL\r\n");
+    }
+}
+
 static void cmd_looptest(const char *arg)
 {
     unsigned rounds = parse_dec(arg, 200u);
@@ -697,6 +733,10 @@ static void cmd_dispatch(char *line)
     }
     if (strcmp(line, "mmutest") == 0) {
         cmd_mmutest(arg);
+        return;
+    }
+    if (strcmp(line, "argtest") == 0) {
+        cmd_argtest();
         return;
     }
     potato_printf("[POTATO] unknown command: %s (try 'help')\r\n", line);

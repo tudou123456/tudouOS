@@ -7,13 +7,20 @@
   flash_image.bin   4MB 全量 flash 镜像（QEMU 直接使用；真机可整体烧录）
 
 真机烧录偏移（二级引导偏移）会在构建结束时打印，见 README。
+门禁（D-10）：-Werror（编译警告即失败）+ flash 镜像 IROM 区段逐字节自检。
+历史上有过 "objdump 验证 loop 指令为 0" 的门禁计划，E-01 判定实验已
+证明 loop 指令在本 QEMU 正常（回归用例 test_loop_instruction 固化），
+故不设该门禁。
 """
 
 import glob
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import envlib  # noqa: E402
@@ -47,9 +54,11 @@ def toolchain_env(cc):
 def probe_mcpu(cc, env):
     """更新的统一工具链支持 -mcpu 选核；不支持的（如 13.2）返回空。"""
     with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, "probe.c")
         out = os.path.join(td, "probe.o")
-        r = subprocess.run([cc, "-mcpu=esp32s3", "-c", "-xc", "-", "-o", out],
-                           input=PROBE_SRC, capture_output=True, text=True,
+        Path(src).write_text(PROBE_SRC, encoding="ascii")
+        r = subprocess.run([cc, "-mcpu=esp32s3", "-c", "-xc", src, "-o", out],
+                           capture_output=True, text=True,
                            shell=False, env=env)
         return ["-mcpu=esp32s3"] if r.returncode == 0 else []
 
@@ -73,6 +82,24 @@ def bootloader_offset():
         return 0x0
 
 
+def check_toolchain_versions(cc):
+    """软性版本校验：工具链/QEMU 版本漂移会改变 QEMU 六坑相关测试的
+    容差行为（envlib 固定的版本是实测基线），漂移即提醒。
+    版本号从安装路径解析（crosstool 发布目录名含版本），不执行进程。"""
+    m = re.search(r"(\d+\.\d+\.\d+)", cc)
+    if m and m.group(1) != "13.2.0":
+        print(f"警告: 工具链版本 {m.group(1)} != 实测基线 13.2.0，"
+              "QEMU 相关测试容差可能失真")
+    qemu = envlib.find_qemu()
+    if qemu and "esp-develop" not in qemu:
+        print(f"警告: QEMU 非乐鑫分支构建（{qemu}），已知六坑假设可能不成立")
+
+
+def want_clean():
+    """--clean 独立小函数解析 argv（与构建命令分域），避免命令构造混入输入。"""
+    return "--clean" in sys.argv[1:]
+
+
 def main():
     cc = envlib.find_cc()
     if not cc:
@@ -81,7 +108,11 @@ def main():
     if not envlib.esptool_module():
         print("未找到 esptool，请执行: python -m pip install esptool")
         return 1
+    check_toolchain_versions(cc)
 
+    if want_clean() and os.path.isdir(OBJDIR):
+        shutil.rmtree(OBJDIR)
+        print("已清理", OBJDIR)
     os.makedirs(OBJDIR, exist_ok=True)
     env = toolchain_env(cc)
     mcpu = probe_mcpu(cc, env)
@@ -91,16 +122,20 @@ def main():
     # 汇编：M5 起跨区调用（IRAM 汇编 ↔ IROM C 代码）需要长调用（l32r+callx0）；
     # 字面量由链接脚本归入 IRAM（l32r 向后取，详见 tudou.ld）
     asm_flags = ["-mabi=call0", "-mlongcalls", "-I", INCLUDE_DIR] + mcpu
+    # -Werror 为门禁（D-10）；确实需要临时放行的场合直接编辑本行，勿提交
     cflags = base_flags + [
-        "-O2", "-g", "-Wall", "-Wextra", "-std=gnu11",
+        "-O2", "-g", "-Wall", "-Wextra", "-Werror", "-std=gnu11",
         "-ffreestanding", "-fno-builtin", "-fno-stack-protector",
         "-ffunction-sections", "-fdata-sections",
         "-I", INCLUDE_DIR,
     ]
 
-    # ---- 1. 编译 ----
-    print("[1/4] 编译内核 ...")
+    # ---- 1. 编译（mtime 增量：源头文件或任一头文件新于 .o 才重编） ----
+    headers = sorted(glob.glob(os.path.join(INCLUDE_DIR, "*.h")))
+    newest_hdr = max([os.path.getmtime(h) for h in headers] + [0])
+    print("[1/4] 编译内核（增量）...")
     objs = []
+    rebuilt = 0
     for src in sorted(glob.glob(os.path.join(KERNEL_DIR, "kernel", "*.c")) +
                       glob.glob(os.path.join(KERNEL_DIR, "boot", "*.S")) +
                       glob.glob(os.path.join(KERNEL_DIR, "intc", "*.c")) +
@@ -116,18 +151,26 @@ def main():
                       glob.glob(os.path.join(KERNEL_DIR, "fs", "*.c")) +
                       glob.glob(os.path.join(KERNEL_DIR, "mcp", "*.c"))):
         obj = os.path.join(OBJDIR, os.path.splitext(os.path.basename(src))[0] + ".o")
+        if (os.path.isfile(obj) and os.path.getmtime(src) < os.path.getmtime(obj)
+                and newest_hdr < os.path.getmtime(obj)):
+            objs.append(obj)  # 增量命中
+            continue
         flags = cflags if src.endswith(".c") else asm_flags
-        subprocess.run([cc] + flags + ["-c", src, "-o", obj], check=True, shell=False, env=env)
+        subprocess.run([cc, *flags, "-c", src, "-o", obj],
+                       check=True, shell=False, env=env)
         print("   CC", os.path.basename(src))
         objs.append(obj)
+        rebuilt += 1
+    print(f"   重编 {rebuilt} / {len(objs)} 个目标文件")
 
     # ---- 2. 链接 ----
     print("[2/4] 链接 kernel.elf ...")
     subprocess.run([cc, "-nostdlib", "-static",
                     "-T", LINKER_SCRIPT,
-                    "-Wl,--gc-sections", "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
+                    "-Wl,--gc-sections", "-Wl,--build-id=none",
+                    "-Wl,--no-warn-rwx-segments",
                     "-Wl,--no-relax",
-                    "-o", ELF] + objs, check=True, shell=False, env=env)
+                    "-o", ELF, *objs], check=True, shell=False, env=env)
 
     # ---- 3. elf2image ----
     print("[3] 生成 ESP 镜像 potato_boot.bin ...")
@@ -135,8 +178,9 @@ def main():
     # v5 用连字符长选项(--flash-mode)；v4 用下划线(--flash_mode)
     fs = "--flash-" if v >= 5 else "--flash_"
     BOOT_ELF = os.path.join(BUILD, "kernel_boot.elf")
-    subprocess.run([cc.replace("gcc", "objcopy"), "--remove-section=.irom_text",
-                    ELF, BOOT_ELF], check=True, shell=False, env=env)
+    objcopy = cc.replace("gcc", "objcopy")
+    subprocess.run([objcopy, "--remove-section=.irom_text", ELF, BOOT_ELF],
+                   check=True, shell=False, env=env)
     subprocess.run([sys.executable, "-m", "esptool", "--chip", "esp32s3", "elf2image",
                     fs + "mode", "dio",
                     fs + "freq", "80m",
@@ -145,7 +189,7 @@ def main():
 
     # ---- 4b. 抽取 IROM 段（C 代码+只读数据，LMA 0x10020 起）----
     print("[4b] 抽取 IROM 段 irom.bin ...")
-    subprocess.run([cc.replace("gcc", "objcopy"), "-O", "binary",
+    subprocess.run([objcopy, "-O", "binary",
                     "--only-section=.irom_text", ELF, IROM_BIN],
                    check=True, shell=False, env=env)
 
@@ -162,7 +206,6 @@ def main():
     # ---- 6. 自检：flash 镜像的 IROM 区段必须与 irom.bin 逐字节一致 ----
     # 防止"烧录提示"与镜像布局再次脱节（M5 后 C 代码在 flash 0x10020 起）
     print("[6] 自检 flash 镜像 IROM 区段 ...")
-    from pathlib import Path
     img = Path(FLASH_IMG).read_bytes()
     seg = Path(IROM_BIN).read_bytes()
     region = img[IROM_FLASH_OFFSET:IROM_FLASH_OFFSET + len(seg)]

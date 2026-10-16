@@ -144,7 +144,7 @@ void pot_heap_init(void)
     uint32_t lo = ((uint32_t)_heap_start + H_ALIGN - 1u) & ~(H_ALIGN - 1u);
     uint32_t hi = (uint32_t)_heap_end & ~(H_ALIGN - 1u);
 
-    for (volatile int i = 0; i < H_NBUCKETS; i++) {
+    for (volatile unsigned i = 0; i < H_NBUCKETS; i++) {
         g_bucket[i] = 0;
     }
     g_bitmap = 0;

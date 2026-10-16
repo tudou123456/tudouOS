@@ -32,14 +32,6 @@ static volatile unsigned g_ack_ms;  /* 接收方回执延迟 */
 static volatile unsigned g_snd_to;  /* 发送超时 ms */
 static volatile unsigned g_snd_qos; /* 发送 QoS（避免任务里再 strcmp） */
 
-static void ch_init_once(void)
-{
-    if (!g_ch_ready) {
-        pot_channel_init(&g_ch, "demo", g_ring, MSG_CH_CAP, 0);
-        g_ch_ready = 1;
-    }
-}
-
 /* ---------- 发送方 ---------- */
 
 static void sender_task(void *arg)
