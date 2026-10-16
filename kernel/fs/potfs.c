@@ -1,6 +1,7 @@
 #include <stdint.h>
 
 #include "heap.h"
+#include "intc.h"
 #include "lib_shim.h"
 #include "potfs.h"
 
@@ -55,11 +56,15 @@ int potfs_write(const char *name, const char *buf, uint32_t len)
         return -1;
     }
 
-    /* D-25 写时复制：先备好新缓冲，任何失败路径都不动旧文件状态 */
+    /* D-25 写时复制：先备好新缓冲，任何失败路径都不动旧文件状态。
+     * D-04：整个写入序列临界区化（真抢占下 console/mcp 并发改写） */
+    uint32_t ps = irq_save();
+
     uint8_t *nd = 0;
     if (len != 0u) {
         nd = (uint8_t *)pot_heap_alloc(len, FS_TAG);
         if (nd == 0) {
+            irq_restore(ps);
             return -1; /* 分配失败：旧内容原样保留 */
         }
         for (volatile uint32_t i = 0; i < len; i++) {
@@ -74,6 +79,7 @@ int potfs_write(const char *name, const char *buf, uint32_t len)
             if (nd != 0) {
                 pot_heap_free(nd);
             }
+            irq_restore(ps);
             return -1; /* 表满：旧内容不受影响 */
         }
         f->used = 1u;
@@ -87,6 +93,7 @@ int potfs_write(const char *name, const char *buf, uint32_t len)
     }
     f->data = nd;
     f->size = len;
+    irq_restore(ps);
     return (int)len;
 }
 
@@ -111,8 +118,10 @@ uint32_t potfs_size(const char *name)
 
 int potfs_delete(const char *name)
 {
+    uint32_t ps = irq_save(); /* D-04 */
     potfs_file_t *f = find_slot(name);
     if (f == 0) {
+        irq_restore(ps);
         return -1;
     }
     if (f->data != 0) {
@@ -122,6 +131,7 @@ int potfs_delete(const char *name)
     f->size = 0u;
     f->used = 0u;
     f->name[0] = '\0';
+    irq_restore(ps);
     return 0;
 }
 

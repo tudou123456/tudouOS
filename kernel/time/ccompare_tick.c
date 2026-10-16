@@ -4,6 +4,7 @@
 #include "intc.h"
 #include "tick.h"
 #include "time.h"
+#include "uart.h"
 
 /*
  * 内核 tick — Xtensa 核内 CCOMPARE0（中断 6，level-1，经通用异常
@@ -28,6 +29,8 @@ static volatile uint32_t g_jit_min = 0xFFFFFFFFu;
 static volatile uint32_t g_jit_max;
 static uint32_t g_next_cc;
 static uint32_t g_last_fire_cc;
+static volatile int g_irq_armed; /* D-04：中断驱动启用后停用轮询路径
+                                    （两者同写 g_next_cc/g_now 会竞态） */
 
 #if !POT_TIME_TIMG /* Windows QEMU 路线：ccount 兼任微秒时基 */
 static uint32_t g_boot_cc;
@@ -70,16 +73,38 @@ void tick_init(void)
 {
     g_last_fire_cc = ccount();
     g_next_cc = g_last_fire_cc + TICK_PERIOD_CC;
-    /* v4：不使能 int6——调度核心去中断化（该 QEMU 的异常×手动退出
-       交互存在不可修复的竞态），tick 由 pot_tick_poll() 在任务检查点
-       与空闲循环内联处理；真机阶段再恢复中断驱动。 */
+    /* v5（D-03）：比较器基准就绪。int6 的使能拆到 tick_irq_arm()——
+       必须等 pot_sched_init 设好 pot_current 之后，否则首个 tick 的
+       抢占路径会以 pot_current==NULL 运行。 */
+}
+
+void tick_irq_arm(void)
+{
+    set_ccompare0(g_next_cc);
+    g_irq_armed = 1;
+    intc_enable_int(CCOMPARE0_INT); /* int6，level-1，经 genex EXCCAUSE=4 */
 }
 
 /* 轮询推进 tick：到点则补记并驱动调度器记账/唤醒。
- * 在任务级上下文调用（yield/sleep 入口、空闲循环）。 */
+ * v5（D-03/D-04）：int6 使能后作为**看门狗自愈**——QEMU esp32s3 模型
+ * 在"genex 上下文切走 + CCOMPARE 活动"的组合下会随机丢 tick（M3
+ * 时代三版设计冻结的同源问题，E-02 已排除寄存器用法因素）。idle 自旋
+ * 与检查点高频调用本函数：发现错过 ≥4 个周期即就地把 tick 补上并
+ * 重挂比较器，系统在数百 µs 内自愈。 */
 void pot_tick_poll(void)
 {
-    uint32_t now = ccount();
+    uint32_t now;
+    if (g_irq_armed) {
+        uint32_t ps = irq_save(); /* 与真 tick 中断互斥（防补账交错） */
+        now = ccount();
+        if ((int32_t)(now - g_next_cc) >= (int32_t)(4 * TICK_PERIOD_CC)) {
+            /* tick 中断丢失：走与 tick_irq_handler 相同的补账+重挂 */
+            tick_irq_handler();
+        }
+        irq_restore(ps);
+        return;
+    }
+    now = ccount();
     while ((int32_t)(now - g_next_cc) >= 0) {
         uint32_t elapsed = (now - (g_next_cc - TICK_PERIOD_CC)) / TICK_PERIOD_CC;
         if (elapsed == 0u) {

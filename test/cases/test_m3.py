@@ -111,7 +111,7 @@ def test_sched_trace(ctx):
     ctx.serial.expect(READY_LINE, timeout=20)
     ctx.serial.send("sleep 50")
     ctx.serial.expect(r"\[POTATO\]\[D\] SLEPT 50", timeout=10)
-    ctx.serial.send("trace 32")
+    ctx.serial.send("trace 128")  # v5：tick 中断驱动后 IRQ 事件密度高（2 条/tick），取大窗口
     m = ctx.serial.expect(r"\[POTATO\]\[TR\] total=\d+ dropped=\d+ last (\d+):", timeout=5)
     n_printed = int(m.group(1))
     n_sched = 0

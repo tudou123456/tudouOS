@@ -1,5 +1,6 @@
 #include <stdint.h>
 
+#include "intc.h"
 #include "lib_shim.h"
 #include "msg.h"
 #include "task.h"
@@ -19,6 +20,33 @@
 
 #define POT_MSG_SLICE_MS 2u /* 等待轮询切片 */
 
+/* M8：通道注册表（健康快照遍历用；初始化即登记，去重） */
+#define POT_CH_REG_MAX 8
+static pot_channel_t *g_ch_reg[POT_CH_REG_MAX];
+static int g_ch_n;
+
+int pot_channel_count(void)
+{
+    return g_ch_n;
+}
+
+pot_channel_t *pot_channel_at(int i)
+{
+    return (i >= 0 && i < g_ch_n) ? g_ch_reg[i] : 0;
+}
+
+static void channel_register(pot_channel_t *ch)
+{
+    for (int i = 0; i < g_ch_n; i++) {
+        if (g_ch_reg[i] == ch) {
+            return;
+        }
+    }
+    if (g_ch_n < POT_CH_REG_MAX) {
+        g_ch_reg[g_ch_n++] = ch;
+    }
+}
+
 static inline int past(uint32_t deadline)
 {
     return (int32_t)(pot_sched_now() - deadline) >= 0;
@@ -35,6 +63,7 @@ int pot_channel_init(pot_channel_t *ch, const char *name,
     ch->ring = ring;
     ch->cap = cap;
     ch->drop_oldest = (uint8_t)(drop_oldest != 0);
+    channel_register(ch);
     return 0;
 }
 
@@ -137,7 +166,11 @@ int pot_msg_send(pot_channel_t *ch, pot_msg_t *m, uint32_t timeout_ms)
 
     for (;;) {
         pot_tick_poll();
+        /* D-04：通道环/窗口多步变更非重入（发送方与接收方任务在 v5
+           真抢占下并发），入队段加临界区；等待段在临界区外睡眠 */
+        uint32_t ps = irq_save();
         int r = enq(ch, m);
+        irq_restore(ps);
         if (r == 3) {
             return 1; /* QoS0 满丢新 */
         }
@@ -156,7 +189,13 @@ int pot_msg_send(pot_channel_t *ch, pot_msg_t *m, uint32_t timeout_ms)
         }
 
         /* QoS1/2：等回执（切片轮询） */
-        while (!acked_hit(ch, m->sender, m->id)) {
+        for (;;) {
+            uint32_t ps = irq_save();
+            int hit = acked_hit(ch, m->sender, m->id);
+            irq_restore(ps);
+            if (hit) {
+                break;
+            }
             pot_tick_poll();
             if (past(deadline)) {
                 attempts++;
@@ -179,8 +218,13 @@ int pot_msg_send(pot_channel_t *ch, pot_msg_t *m, uint32_t timeout_ms)
             }
             pot_task_sleep(POT_MSG_SLICE_MS);
         }
-        if (acked_hit(ch, m->sender, m->id)) {
-            return 0; /* 已回执 */
+        {
+            uint32_t ps = irq_save();
+            int hit = acked_hit(ch, m->sender, m->id);
+            irq_restore(ps);
+            if (hit) {
+                return 0; /* 已回执 */
+            }
         }
         /* 超时重发路径：回到循环头 */
     }
@@ -192,7 +236,10 @@ int pot_msg_recv(pot_channel_t *ch, pot_msg_t *out, uint32_t timeout_ms)
 
     for (;;) {
         pot_tick_poll();
-        if (deq(ch, out) == 0) {
+        uint32_t ps = irq_save(); /* D-04：环指针多步变更 */
+        int got = deq(ch, out);
+        irq_restore(ps);
+        if (got == 0) {
             return 0;
         }
         if (past(deadline)) {
@@ -204,12 +251,15 @@ int pot_msg_recv(pot_channel_t *ch, pot_msg_t *out, uint32_t timeout_ms)
 
 void pot_msg_ack(pot_channel_t *ch, const pot_msg_t *m)
 {
+    uint32_t ps = irq_save(); /* D-04：回执窗口多步变更 */
     if (acked_hit(ch, m->sender, m->id)) {
+        irq_restore(ps);
         return;
     }
     ch->acked[ch->acked_idx].sender = m->sender;
     ch->acked[ch->acked_idx].id = m->id;
     ch->acked_idx = (uint8_t)((ch->acked_idx + 1) & 7);
     ch->c_ack++;
+    irq_restore(ps);
     trace_push(TR_MSG_ACK, (uint32_t)ch, m->id);
 }

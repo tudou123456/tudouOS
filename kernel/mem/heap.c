@@ -1,6 +1,7 @@
 #include <stdint.h>
 
 #include "heap.h"
+#include "intc.h"
 #include "potato.h"
 #include "trace.h"
 
@@ -190,9 +191,14 @@ void *pot_heap_alloc(uint32_t size, uint32_t tag)
         need = H_MIN_BLOCK;
     }
 
+    /* D-04：堆操作非重入（空闲表/位图/统计多步变更），v5 真抢占下
+       多任务可并发进入——临界区屏蔽 level-1 tick 抢占（UART level-2
+       不触碰堆；操作无睡眠，持锁微秒级） */
+    uint32_t ps = irq_save();
     hblock_t *b = find_block(need);
     if (b == 0) {
         g_stat.n_fail++;
+        irq_restore(ps);
         return 0;
     }
     free_remove(b);
@@ -209,6 +215,7 @@ void *pot_heap_alloc(uint32_t size, uint32_t tag)
         g_stat.max_used = g_stat.used;
     }
     g_stat.n_alloc++;
+    irq_restore(ps);
     trace_push(TR_MEM_ALLOC, b->size, tag);
     return (void *)((uint8_t *)b + H_HDR);
 }
@@ -220,8 +227,10 @@ void pot_heap_free(void *ptr)
     }
     hblock_t *b = (hblock_t *)((uint8_t *)ptr - H_HDR);
 
+    uint32_t ps = irq_save(); /* D-04：与 alloc 同域的非重入多步操作 */
     if (b->magic != H_MAGIC_ALLOC) {
         g_stat.n_fault++;
+        irq_restore(ps);
         trace_push(TR_MEM_FAULT, 2 /* bad-free */, b->tag);
         return; /* 非法/重复释放：吞掉并计数（DEAD 墓碑也落在此） */
     }
@@ -233,6 +242,7 @@ void pot_heap_free(void *ptr)
         g_stat.n_fault++;
         trace_push(TR_MEM_FAULT, 4 /* header corrupt */, b->tag);
         b->magic = H_MAGIC_DEAD;
+        irq_restore(ps);
         return;
     }
 
@@ -286,6 +296,7 @@ void pot_heap_free(void *ptr)
 
     g_stat.used -= asize;
     g_stat.n_free++;
+    irq_restore(ps);
     trace_push(TR_MEM_FREE, bsize, tag_saved);
 }
 

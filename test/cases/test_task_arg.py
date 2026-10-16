@@ -12,8 +12,9 @@ def test_task_arg(ctx):
     """任务收到的参数 == 创建时传入的指针内容（魔数）。"""
     ctx.serial.expect(READY_LINE, timeout=20)
     ctx.serial.send("argtest")
+    # \r 行尾锚点防半行早匹配
     m = ctx.serial.expect(r"\[POTATO\]\[ARG\] recv=0x([0-9a-f]+) "
-                          r"expect=0x([0-9a-f]+)", timeout=30)
+                          r"expect=0x([0-9a-f]+)\r", timeout=30)
     assert m.group(1) == m.group(2) == "c0ffee42", \
         f"任务参数损坏: recv=0x{m.group(1)} expect=0x{m.group(2)}"
-    ctx.serial.expect(r"\[POTATO\]\[ARG\] PASS", timeout=5)
+    ctx.serial.expect(r"\[POTATO\]\[ARG\] PASS\r", timeout=5)

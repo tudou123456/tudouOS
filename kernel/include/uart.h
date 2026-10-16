@@ -14,5 +14,6 @@ void uart0_irq_handler(void);  /* intc 分发调用，勿直接调用 */
 
 uint32_t uart_rx_irq_count(void);
 uint32_t uart_rx_bytes(void);
+int uart_tx_midline(void);     /* D-03：TX 行组装中（调度器推迟抢占用） */
 
 #endif /* TUDOU_UART_H */

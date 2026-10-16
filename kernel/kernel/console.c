@@ -11,6 +11,7 @@
 #include "mcp.h"
 #include "memdemo.h"
 #include "msgdemo.h"
+#include "obs.h"
 #include "pal.h"
 #include "potato.h"
 #include "potfs.h"
@@ -144,6 +145,8 @@ static void cmd_help(void)
               "msgstat, memstat, memtest <mode> [n], pal, drivers, "
               "fs <sub>, mcp on|off, flood <n>, crash, looptest [n]\r\n"
               "  fs: ls|write <n> <t>|cat <n>|rm <n>|mkfs|df\r\n"
+              "  trace: [n]|jsonl [n]|stream on|off|pump|meta|health\r\n"
+              "  health, obs [panic], inject <leak|hang|spin|off> [arg]\r\n"
               "  MCP: lines starting with '{' are JSON-RPC\r\n");
 }
 
@@ -157,21 +160,27 @@ static void cmd_tasks(void)
 {
     uint32_t d[4];
     pot_sched_diag(d);
+    uint32_t rdrop = 0, sdrop = 0, regdrop = 0;
+    pot_sched_drop_diag(&rdrop, &sdrop);
+    regdrop = pot_task_reg_overflow();
     int n = pot_task_count();
     for (int i = 0; i < n; i++) {
         const pot_task_t *t = pot_task_at(i);
         if (t == 0) {
             continue;
         }
-        potato_printf("[POTATO][TS] %s cls=%s st=%d cpu=%u sw=%u\r\n",
+        potato_printf("[POTATO][TS] %s cls=%s st=%d cpu=%u sw=%u stk=%uw "
+                      "(unused %uw)\r\n",
                       t->name, pot_class_name(t->cls), t->state,
-                      t->cpu_ticks, t->switches);
+                      t->cpu_ticks, t->switches, t->stk_words,
+                      pot_task_stack_unused(t));
     }
     potato_printf("[POTATO][TS] now=%u switches=%u bg_used=%u/%u "
-                  "diag wake=%u prem=%u sw=%u idle=%u\r\n",
+                  "diag wake=%u prem=%u sw=%u idle=%u "
+                  "drop ready=%u sleep=%u reg=%u\r\n",
                   pot_sched_now(), pot_sched_total_switches(),
                   pot_sched_bg_used(), (unsigned)POT_SCHED_BG_BUDGET,
-                  d[0], d[1], d[2], d[3]);
+                  d[0], d[1], d[2], d[3], rdrop, sdrop, regdrop);
 }
 
 static void cmd_taskdemo(const char *arg)
@@ -224,9 +233,89 @@ static void cmd_tickstat(void)
                   uart_rx_irq_count(), uart_rx_bytes());
 }
 
+/* 拆首词：把 arg 开头的一个词写进 out（含 '\0'），返回剩余参数指针 */
+static const char *split_word(const char *arg, char *out, int cap)
+{
+    int i = 0;
+    while (*arg != '\0' && *arg != ' ' && i < cap - 1) {
+        out[i++] = *arg++;
+    }
+    out[i] = '\0';
+    while (*arg == ' ') {
+        arg++;
+    }
+    return arg;
+}
+
 static void cmd_trace(const char *arg)
 {
+    /* 子命令：trace [n] | jsonl [n] | stream on|off|pump | meta | health */
+    char sub[10];
+    const char *rest = split_word(arg, sub, (int)sizeof(sub));
+
+    if (sub[0] == '\0') {
+        trace_dump(16u);
+        return;
+    }
+    if (strcmp(sub, "jsonl") == 0) {
+        unsigned n = trace_export_jsonl(parse_dec(rest, 32u));
+        potato_printf("[POTATO][TRJ] exported=%u\r\n", n);
+        return;
+    }
+    if (strcmp(sub, "stream") == 0) {
+        char w[8];
+        const char *r2 = split_word(rest, w, (int)sizeof(w));
+        (void)r2;
+        if (strcmp(w, "on") == 0) {
+            pot_obs_stream_set(1);
+        } else if (strcmp(w, "off") == 0) {
+            pot_obs_stream_set(0);
+        } else if (strcmp(w, "pump") == 0) {
+            unsigned n = pot_obs_pump();
+            potato_printf("[POTATO][OBS] pump=%u pumped=%u lost=%u\r\n",
+                          n, pot_obs_pumped(), pot_obs_lost());
+        } else {
+            uart_puts("[POTATO][OBS] usage: trace stream on|off|pump\r\n");
+        }
+        return;
+    }
+    if (strcmp(sub, "meta") == 0) {
+        static char mbuf[768];
+        trace_meta_json(mbuf, sizeof(mbuf), pot_obs_stream_on());
+        potato_printf("[POTATO][TRM] %s\r\n", mbuf);
+        return;
+    }
+    if (strcmp(sub, "health") == 0) {
+        pot_obs_health();
+        return;
+    }
     trace_dump(parse_dec(arg, 16u));
+}
+
+static void cmd_health(void)
+{
+    pot_obs_health();
+}
+
+static void cmd_inject(const char *arg)
+{
+    /* inject <leak|hang|spin|off> [arg] */
+    char mode[10];
+    const char *rest = split_word(arg, mode, (int)sizeof(mode));
+    pot_inject_cmd(mode, parse_dec(rest, 0));
+}
+
+static void cmd_obs(const char *arg)
+{
+    /* obs panic → 崩溃诊断样例（快照 + 最近事件 JSONL） */
+    if (strcmp(arg, "panic") == 0) {
+        pot_obs_panic_dump();
+        return;
+    }
+    potato_printf("[POTATO][OBS] stream=%d pumped=%u lost=%u calls=%u "
+                  "health_n=%u\r\n",
+                  pot_obs_stream_on(), pot_obs_pumped(), pot_obs_lost(),
+                  pot_obs_pump_calls(), pot_obs_health_count());
 }
 
 static void cmd_flood(const char *arg)
@@ -431,6 +520,22 @@ static void cmd_mcp(const char *arg)
     }
     potato_printf("[POTATO][MCP] running=%d (mcp on|off; "
                   "JSON-RPC 行以 '{' 开头直接投递)\r\n", mcp_running());
+}
+
+static void cmd_preempt(const char *arg)
+{
+    if (strcmp(arg, "off") == 0) {
+        pot_sched_set_preempt(0);
+        uart_puts("[POTATO][SCH] preempt disabled (checkpoint only)\r\n");
+        return;
+    }
+    if (strcmp(arg, "on") == 0) {
+        pot_sched_set_preempt(1);
+        uart_puts("[POTATO][SCH] preempt enabled (tick IRQ + rfe)\r\n");
+        return;
+    }
+    potato_printf("[POTATO][SCH] preempt=%d (preempt on|off)\r\n",
+                  pot_sched_preempt_enabled());
 }
 
 static void cmd_crash(void)
@@ -742,6 +847,22 @@ static void cmd_dispatch(char *line)
     }
     if (strcmp(line, "argtest") == 0) {
         cmd_argtest();
+        return;
+    }
+    if (strcmp(line, "preempt") == 0) {
+        cmd_preempt(arg);
+        return;
+    }
+    if (strcmp(line, "health") == 0) {
+        cmd_health();
+        return;
+    }
+    if (strcmp(line, "obs") == 0) {
+        cmd_obs(arg);
+        return;
+    }
+    if (strcmp(line, "inject") == 0) {
+        cmd_inject(arg);
         return;
     }
     potato_printf("[POTATO] unknown command: %s (try 'help')\r\n", line);

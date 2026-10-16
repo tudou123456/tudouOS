@@ -135,9 +135,8 @@ unsigned exception_dispatch(unsigned vec_flag, void *frame_base)
     }
 
     if (vec_flag == 0u) {
-        if (cause == 4u) { /* level-1 中断（tick）：记账+唤醒，不在中断上下文切换 */
-            intc_l1_dispatch();
-            return 1;
+        if (cause == 4u) { /* level-1 中断（tick）：记账+唤醒+抢占决策 */
+            return intc_l1_dispatch(frame_base);
         }
         if (cause == 1u) { /* syscall：任务级切换（yield/sleep/exit/检查点） */
             if (pot_sched_try_syscall(frame_base)) {
@@ -157,8 +156,11 @@ unsigned exception_dispatch(unsigned vec_flag, void *frame_base)
                   vec_flag != 0u ? "DOUBLE_EXCEPTION" : "EXCEPTION");
     potato_printf("[POTATO][EXC] cause=%u(%s) epc=0x%x vaddr=0x%x ps=0x%x\r\n",
                   cause, cause_name(cause), epc, vaddr, ps);
+    /* D-13：调度器初始化前的故障 pot_current 为空（boot/驱动初始化阶段），
+     * 判空避免二次异常吞掉原始现场 */
     potato_printf("[POTATO][EXC] task=%s ticks=%u trace_dropped=%u\r\n",
-                  pot_current->name, time_tick_count(), trace_dropped());
+                  (pot_current != 0) ? pot_current->name : "pre-sched",
+                  time_tick_count(), trace_dropped());
     potato_printf("[POTATO][EXC] HALTED (QMP system_reset 可复位重启)\r\n");
 
     halt_forever();

@@ -5,6 +5,7 @@
 #include "heap.h"
 #include "intc.h"
 #include "mcp.h"
+#include "obs.h"
 #include "pal.h"
 #include "potfs.h"
 #include "task.h"
@@ -33,10 +34,12 @@ void kernel_main(void)
     time_source_init();
     tick_init();
     pot_sched_init(); /* M3：调度器（main 即控制台任务，idle 兜底） */
+    tick_irq_arm();   /* D-03 v5：tick 中断驱动抢占（E-02 实证 rfe 路线） */
     pot_heap_init();  /* M4：轻量堆（消息基座大负载/动态栈的地基） */
     potfs_format();   /* M6：内存文件系统（RAM 盘语义：上电即空盘） */
     mcp_init();       /* M6：MCP 适配器通道（代理任务由 mcp on 启动） */
     uart_irq_init();
+    pot_obs_init();   /* M8：可观测体系（流式 JSONL + 健康快照，按需启动任务） */
 
     potato_printf("\r\n[POTATO] %s v%s (%s kernel) on %s\r\n",
                   POTATO_NAME, POTATO_VERSION, POTATO_KERNEL, POTATO_TARGET);

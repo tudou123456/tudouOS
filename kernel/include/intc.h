@@ -25,8 +25,9 @@ void intc_enable_int(unsigned int_num);
 /* vectors.S 胶水在关中断现场保存后调用（汇编侧入口，勿直接调用） */
 void intc_irq_dispatch(unsigned level);
 
-/* 通用异常(EXCCAUSE=4)路径的 level-1 分发；1=已处理可恢复 */
-unsigned intc_l1_dispatch(void);
+/* 通用异常(EXCCAUSE=4)路径的 level-1 分发；1=已处理可恢复。
+ * frame_base 为被打断上下文的帧基址（抢占切换用，切换时不返回） */
+unsigned intc_l1_dispatch(void *frame_base);
 
 /* 意外向量（窗口异常等 call0 内核不应出现的入口）的处理，不返回 */
 void intc_unexpected_vector(unsigned vector_offset);
@@ -40,10 +41,13 @@ static inline void intc_enable_interrupts(void)
     (void)ps;
 }
 
+/* D-04：临界区只屏蔽 level-1（tick）——不是 15。INTLEVEL=15 期间挂起的
+ * 设备源会触发 QEMU 活锁（M2 已知问题），且任务态唯一竞态对象是
+ * level-1 tick 会触碰的调度器结构；UART(level-2) 不改调度器状态。 */
 static inline uint32_t irq_save(void)
 {
     uint32_t ps;
-    asm volatile("rsil %0, 15" : "=r"(ps) :: "memory");
+    asm volatile("rsil %0, 1" : "=r"(ps) :: "memory");
     return ps;
 }
 

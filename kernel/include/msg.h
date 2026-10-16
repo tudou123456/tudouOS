@@ -97,6 +97,10 @@ int pot_msg_recv(pot_channel_t *ch, pot_msg_t *out, uint32_t timeout_ms);
 /* 回执（记录进通道回执窗口并唤醒发送方） */
 void pot_msg_ack(pot_channel_t *ch, const pot_msg_t *m);
 
+/* M8：已初始化通道注册表（健康快照/统计遍历；上限 POT_CH_REG_MAX=8） */
+int pot_channel_count(void);
+pot_channel_t *pot_channel_at(int i);
+
 /* 当前 tick（deadline 计算用） */
 static inline uint32_t pot_msg_now(void)
 {

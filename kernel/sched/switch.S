@@ -62,12 +62,19 @@ pot_task_trampoline:
     j       1b
 
 /* ---------- 统一恢复（异常上下文调用，a2 = tcb） ----------
- * a0 槽即恢复续体（syscall 帧=C 返回地址；初始帧=蹦床），
- * 恢复常态 PS 后 ret.n 离开异常上下文（手动退出，QEMU 实测可靠——
- * v1 失败根因是链表环与 EPS1，不是本路径）。 */
+ * v5（D-03/D-14）：全部恢复统一走 rfe——EPC1=帧 a0 槽续体（syscall 帧
+ * = C 返回地址；初始帧=蹦床），SR194=常态 PS（E-02 判定实验：rfe 从
+ * SR194 取 PS，非 SR161）。全程 EXCM=1 到 rfe 为止，不存在"半恢复
+ * 上下文"退出窗口（v4 的 wsr.ps+ret.n 在 int6 使能后，pending tick
+ * 落入窗口会把半恢复的 a2/a3 当任务寄存器存进新帧）。 */
     .globl pot_do_resume
 pot_do_resume:
     l32i    a1, a2, TCB_SP_OFF
+    movi    a3, pot_task_ps
+    l32i    a3, a3, 0
+    wsr     a3, 194               /* 常态 PS → SR194（rfe 取数槽） */
+    l32i    a3, a1, 0
+    wsr.epc1 a3                   /* 续体 PC = 帧 a0 槽 */
     l32i    a0, a1, 0
     l32i    a3, a1, 8
     l32i    a4, a1, 12
@@ -90,18 +97,46 @@ pot_do_resume:
     wsr.lend a3
     l32i    a3, a1, 72
     wsr.lcount a3
-    movi    a3, pot_task_ps         /* 常态 PS 直接恢复（v4 无 tick 中断，
-                                       退出窗口无挂起源） */
-    l32i    a3, a3, 0
-    wsr.ps  a3
     esync
-    /* D-02：a3 在上面被借作 sar/lbeg/lend/lcount/PS 的暂存，此处必须
-       从帧槽 +8 重载任务参数（帧基址 a1 在下一条 addi 前仍有效）。
-       同理 a2 也在此重载（帧 +4）。退出窗口（wsr.ps 之后、ret 之前）
-       若落 level-2 IRQ：ISR 的 SAVE/RESTORE 自带对称 88B 帧，
-       call0 下 a1=帧基址仍 4 字节对齐，机械上安全（真机启用 level-1
-       抢占前需按 D-14 复核此窗口）。 */
-    l32i    a3, a1, 8
+    l32i    a3, a1, 8             /* D-02：任务参数（a3 曾借作暂存） */
     l32i    a2, a1, 4
     addi    a1, a1, 88
-    ret.n
+    rfe
+
+/* ---------- IRQ 帧恢复（D-03 v5：tick 抢占路径） ----------
+ * 被 tick 抢占任务的帧 +76/+80 槽是 SAVE_CALL0_REGS 存的硬件
+ * EPC1/异常 PS。 */
+    .globl pot_do_resume_irq
+pot_do_resume_irq:
+    l32i    a1, a2, TCB_SP_OFF
+    l32i    a3, a1, 80
+    wsr     a3, 194               /* 异常 PS → SR194（rfe 的取数槽） */
+    l32i    a3, a1, 76
+    wsr.epc1 a3                   /* 恢复续体 PC */
+    l32i    a0, a1, 0
+    l32i    a3, a1, 8
+    l32i    a4, a1, 12
+    l32i    a5, a1, 16
+    l32i    a6, a1, 20
+    l32i    a7, a1, 24
+    l32i    a8, a1, 28
+    l32i    a9, a1, 32
+    l32i    a10, a1, 36
+    l32i    a11, a1, 40
+    l32i    a12, a1, 44
+    l32i    a13, a1, 48
+    l32i    a14, a1, 52
+    l32i    a15, a1, 56
+    l32i    a3, a1, 60
+    wsr.sar a3
+    l32i    a3, a1, 64
+    wsr.lbeg a3
+    l32i    a3, a1, 68
+    wsr.lend a3
+    l32i    a3, a1, 72
+    wsr.lcount a3
+    esync
+    l32i    a3, a1, 8             /* D-02：任务参数重载 */
+    l32i    a2, a1, 4
+    addi    a1, a1, 88
+    rfe

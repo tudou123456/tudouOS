@@ -3,8 +3,11 @@
 
 #include <stdint.h>
 
-/* 核内 CCOMPARE0 tick：标定 CPU 频率并启动（intc_init 之后调用） */
+/* 核内 CCOMPARE0 tick：装好比较器基准（intc_init 之后调用） */
 void tick_init(void);
+/* D-03 v5：使能 int6 中断驱动（必须在 pot_sched_init 之后调用，
+ * 否则 tick 抢占在 pot_current 就绪前触发会踩空） */
+void tick_irq_arm(void);
 uint32_t tick_cpu_hz(void);
 
 /* 最近一次触发补记的周期数（调度器记账用） */

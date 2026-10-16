@@ -37,6 +37,7 @@ static volatile uint16_t g_rx_head;
 static volatile uint16_t g_rx_tail;
 static volatile uint32_t g_rx_irq_count;
 static volatile uint32_t g_rx_bytes;
+static volatile int g_tx_midline; /* D-03：TX 行组装中标记 */
 
 void uart_init(void)
 {
@@ -84,6 +85,18 @@ void uart_putc(char c)
     while (ST_TXFIFO_CNT(mmio_read(UART_STATUS)) != 0u) {
     }
     mmio_write(UART_FIFO, (uint32_t)(uint8_t)c);
+    /* D-03：行组装标记——自上一个换行起有字节发出且尚未收行。
+     * 调度器据此把 tick 抢占推迟到行边界，保住逐行输出锚点。 */
+    if (c == '\n') {
+        g_tx_midline = 0;
+    } else {
+        g_tx_midline = 1;
+    }
+}
+
+int uart_tx_midline(void)
+{
+    return g_tx_midline;
 }
 
 /* 诊断探针：直接写 FIFO 一个字符，不查状态（vectors.S 用） */

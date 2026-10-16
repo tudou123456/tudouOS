@@ -78,7 +78,7 @@ def test_my_feature(ctx):
 | PS.INTLEVEL=15 期间置起设备中断源会使 QEMU 陷入活锁（monitor 都无响应） | 初始化顺序纪律：先开全局中断（INTENABLE 为空时安全）再逐级使能设备源；**任何热路径禁止持有高 INTLEVEL**（M3 教训：printf/追踪环加锁后切换风暴必中彩票） |
 | ~~EPS1 特殊寄存器不可访问~~ **【已证伪，E-02 判定实验 2026-10-16】**：`eps1` 名字不存在只是 binutils 未导出（数字 SR 可用）；通用异常入口 QEMU 会回填 EPC1 且把异常前 PS 存入 SR194（binutils 名 eps2）；**rfe 从 EPC1+SR194 完全可控恢复**（console `rfetest` 命令 + `test_rfe_controlled_return` 用例：往 SR161 写 INTLEVEL=1 变体证明 rfe 不读 161、读 194）。"去中断化+手动 wsr.ps+ret.n"绕行不必要，IRQ 帧 rfe 恢复路线可行（D-03 真机抢占为"接线"级工作） | 抢占/异常恢复走 wsr.epc1 + wsr194 + rfe；syscall 语义 EPC1 指向 syscall 指令本身，改 EPC 需 +3（FreeRTOS 同款） |
 | **syscall 异常的 EPC1 指向 syscall 指令本身**（故障 PC 语义），直接恢复会无限重入 | （现设计不依赖 EPC 恢复；若改回 rfe 方案需 EPC+3，FreeRTOS 移植同款处理） |
-| 中断×手动异常退出的交互窗口存在竞态（M3 三个版本切换设计均在该窗口随机冻结） | **调度核心去中断化**：tick 由 pot_tick_poll() 在检查点/空闲循环轮询推进，UART 保留中断（该路径稳定）；idle 纯忙轮询+条件让位（自切换风暴会以百万异常/秒饿死 QEMU 主循环，UART TX 停摆） |
+| 中断×手动异常退出的交互窗口存在竞态（M3 三个版本切换设计均在该窗口随机冻结） | **v5 定论（2026-10-16 深挖）**：tick 已改 int6 中断驱动（genex EXCCAUSE=4 → 记账/唤醒 → RESTORE+rfe，稳定，抖动 11892µs→~2.7ms 级）；**genex 上下文切走任务（rfe 到别的 EPC1）+ CCOMPARE 活动**的组合仍会随机丢 tick/任务重复执行（模型级缺陷，临界区/寄存器用法均已排除，E-02 已实证 rfe 路线本身正确）→ 抢占切换接线完整但默认关闭（`preempt on|off`），**真机（TRM 一致）应默认开**；`pot_tick_poll` 改作看门狗（错过 ≥4 周期即补账重挂）自愈丢拍 |
 | ccount 按翻译块大步推进，比较点被整段跳过（触发率 ~53%） | tick 补记跨过的周期数，计数与虚拟时间对齐 |
 | 通用异常不回填 EPC1/EPS1/EXCVADDR（level-1 中断会回填） | 异常现场保留字段，测试只断言 EXCCAUSE 与恢复语义 |
 | 多任务负载下虚拟时间显著膨胀（且常快于墙钟） | 测试用宿主时钟+宽容差断言，顺序敏感断言改为无序等待 |

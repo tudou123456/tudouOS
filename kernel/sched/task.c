@@ -23,16 +23,30 @@ extern uint32_t pot_task_ps; /* sched.c：任务常态 PS */
 
 #define FRAME_WORDS 22 /* 88 字节，见 switch.S/vectors.S 帧布局 */
 
-/* 任务注册表：main/idle/动态任务全登记，tasks 命令遍历打印 */
-#define REG_MAX 8
+/* 任务注册表：main/idle/动态任务全登记，tasks 命令遍历打印。
+ * D-12：登记前去重（TCB 复用时不得重复追加），表满计数告警 */
+#define REG_MAX 16
 static pot_task_t *g_registry[REG_MAX];
 static int g_reg_n;
+static uint32_t g_reg_overflow; /* 登记溢出计数（tasks 命令可见，应为 0） */
 
 void pot_task_register(pot_task_t *t)
 {
-    if (g_reg_n < REG_MAX) {
-        g_registry[g_reg_n++] = t;
+    for (volatile int i = 0; i < g_reg_n; i++) {
+        if (g_registry[i] == t) {
+            return; /* 已登记（TCB 复用场景） */
+        }
     }
+    if (g_reg_n >= REG_MAX) {
+        g_reg_overflow++;
+        return;
+    }
+    g_registry[g_reg_n++] = t;
+}
+
+uint32_t pot_task_reg_overflow(void)
+{
+    return g_reg_overflow;
 }
 
 int pot_task_count(void)
@@ -45,6 +59,26 @@ pot_task_t *pot_task_at(int i)
     return (i >= 0 && i < g_reg_n) ? g_registry[i] : 0;
 }
 
+/* 栈水位（D-13）：创建时填充花样，tasks 命令扫描从未触碰的连续字数 */
+void pot_task_stack_paint(uint32_t *stack, uint32_t words)
+{
+    for (volatile uint32_t i = 0; i < words; i++) {
+        stack[i] = POT_STACK_PATTERN;
+    }
+}
+
+uint32_t pot_task_stack_unused(const pot_task_t *t)
+{
+    if (t == 0 || t->stk_lo == 0 || t->stk_words == 0) {
+        return 0;
+    }
+    uint32_t n = 0;
+    while (n < t->stk_words && t->stk_lo[n] == POT_STACK_PATTERN) {
+        n++;
+    }
+    return n;
+}
+
 int pot_task_create(pot_task_t *tcb, const char *name, pot_task_class_t cls,
                     pot_task_fn_t fn, void *arg,
                     uint32_t *stack, uint32_t stack_words)
@@ -53,9 +87,10 @@ int pot_task_create(pot_task_t *tcb, const char *name, pot_task_class_t cls,
         return -1;
     }
 
-    /* 栈顶 16 字节对齐后留出首启帧 */
+    /* 栈顶 16 字节对齐后留出首启帧；其余填充水位花样 */
     uint32_t top = (uint32_t)(stack + stack_words) & ~15u;
     uint32_t *frame = (uint32_t *)(top - FRAME_WORDS * 4);
+    pot_task_stack_paint(stack, (uint32_t)(frame - stack));
 
     for (volatile int i = 0; i < FRAME_WORDS; i++) {
         frame[i] = 0;
@@ -75,6 +110,8 @@ int pot_task_create(pot_task_t *tcb, const char *name, pot_task_class_t cls,
     tcb->sleep_until = 0;
     tcb->last_run_tick = pot_sched_now();
     tcb->stop_req = 0;
+    tcb->stk_lo = stack;
+    tcb->stk_words = stack_words;
 
     pot_task_register(tcb);
     sched_static_enqueue(tcb);

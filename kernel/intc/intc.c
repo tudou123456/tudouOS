@@ -54,14 +54,20 @@ void intc_irq_dispatch(unsigned level)
     trace_push(TR_IRQ_EXIT, level, 0);
 }
 
-/* 通用异常路径的 level-1 中断分发；返回 1=已处理可恢复，0=意外源（致命）。
- * M3 使能的唯一 level-1 源是 int6(CCOMPARE0)；该核心无 INTSET SR，
+/* 通用异常路径的 level-1 中断分发；返回 1=已处理可恢复（RESTORE+rfe），
+ * 或直接在异常上下文完成抢占切换（不返回）。
+ * D-03 v5：tick 记账/唤醒后，若有更高有效优先级就绪或时间片耗尽，
+ * 把被打断任务的 IRQ 帧挂到其 TCB 并切换（rfe 恢复，E-02 实证路线）。
+ * 唯一 level-1 源是 int6(CCOMPARE0)；该核心无 INTSET SR，
  * 无法枚举挂起源，若未来启用多个 l1 源需改用 ERI INTSTAT。 */
-unsigned intc_l1_dispatch(void)
+unsigned intc_l1_dispatch(void *frame_base)
 {
     trace_push(TR_IRQ_ENTER, 1, 6);
     tick_irq_handler(); /* 重挂 CCOMPARE0 的写操作顺带清除挂起 */
-    pot_sched_tick(tick_last_elapsed()); /* 调度器记账/唤醒/抢占决策 */
+    pot_sched_tick(tick_last_elapsed()); /* 调度器记账/唤醒 */
     trace_push(TR_IRQ_EXIT, 1, 6);
+    if (pot_sched_should_preempt()) {
+        pot_sched_preempt_from_irq(frame_base); /* 不返回 */
+    }
     return 1;
 }
