@@ -104,7 +104,9 @@ pot_vectors:
     s32i    a2, a1, 72
     rsr.epc1    a2
     s32i    a2, a1, 76
-    rsr     a2, 194               /* EPS1：核心配置未导出名字，用标准 SR 编号 */
+    rsr     a2, 194               /* 异常 PS 槽位（E-02 实证：rfe 从 SR194
+                                     * 恢复 PS；binutils 名 eps2，193 非有效
+                                     * SR，161 标准 EPS1 编号但不被 rfe 读） */
     s32i    a2, a1, 80
     .endm
 

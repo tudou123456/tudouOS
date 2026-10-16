@@ -76,7 +76,7 @@ def test_my_feature(ctx):
 | --- | --- |
 | TIMG0/SYSTIMER 计数器一启用（写 T0_CONFIG 置 EN，与中断无关）QEMU 进程约 1s 内崩溃（0xC0000409） | 时基改用核内 ccount；TIMG/SYSTIMER 驱动保留（`POT_TIME_TIMG=1`）供真机/WSL Linux QEMU |
 | PS.INTLEVEL=15 期间置起设备中断源会使 QEMU 陷入活锁（monitor 都无响应） | 初始化顺序纪律：先开全局中断（INTENABLE 为空时安全）再逐级使能设备源；**任何热路径禁止持有高 INTLEVEL**（M3 教训：printf/追踪环加锁后切换风暴必中彩票） |
-| **EPS1 特殊寄存器不可访问**：工具链配置未导出 eps1 名，SR 194 读写实测无效（读恒 0）→ rfe 无法可控恢复 PS | M3 切换全部走 syscall + 手动 wsr.ps + ret.n（不依赖 epc1/eps1）；中断驱动抢占留给真机阶段 |
+| ~~EPS1 特殊寄存器不可访问~~ **【已证伪，E-02 判定实验 2026-10-16】**：`eps1` 名字不存在只是 binutils 未导出（数字 SR 可用）；通用异常入口 QEMU 会回填 EPC1 且把异常前 PS 存入 SR194（binutils 名 eps2）；**rfe 从 EPC1+SR194 完全可控恢复**（console `rfetest` 命令 + `test_rfe_controlled_return` 用例：往 SR161 写 INTLEVEL=1 变体证明 rfe 不读 161、读 194）。"去中断化+手动 wsr.ps+ret.n"绕行不必要，IRQ 帧 rfe 恢复路线可行（D-03 真机抢占为"接线"级工作） | 抢占/异常恢复走 wsr.epc1 + wsr194 + rfe；syscall 语义 EPC1 指向 syscall 指令本身，改 EPC 需 +3（FreeRTOS 同款） |
 | **syscall 异常的 EPC1 指向 syscall 指令本身**（故障 PC 语义），直接恢复会无限重入 | （现设计不依赖 EPC 恢复；若改回 rfe 方案需 EPC+3，FreeRTOS 移植同款处理） |
 | 中断×手动异常退出的交互窗口存在竞态（M3 三个版本切换设计均在该窗口随机冻结） | **调度核心去中断化**：tick 由 pot_tick_poll() 在检查点/空闲循环轮询推进，UART 保留中断（该路径稳定）；idle 纯忙轮询+条件让位（自切换风暴会以百万异常/秒饿死 QEMU 主循环，UART TX 停摆） |
 | ccount 按翻译块大步推进，比较点被整段跳过（触发率 ~53%） | tick 补记跨过的周期数，计数与虚拟时间对齐 |
@@ -85,7 +85,8 @@ def test_my_feature(ctx):
 | 高频轮询 MMIO 不可取 | 时序热点避免 MMIO 轮询，用 ccount |
 | **ROM 无 flash 映射能力**：对 VMA 在 0x42/0x3c 映射窗口的镜像段走 RAM 拷贝路径，直接 LoadStoreError 踩崩（Guru Meditation）——IDF 的 XIP 是其 RAM 常驻 bootloader 配好 MMU 后再跳的 | 自研二级映射引导（M5）：IROM 段从引导 ELF 剥离（objcopy --remove-section），LMA 落 flash 0x10020；boot.S 配 MMU（表@0x600C5000）+ icache（0x600C4060）后跳 XIP |
 | esptool 会把 flash 映射段排在镜像最前且强加 64KB 页对齐填充段 | 引导镜像只含 RAM 段（esptool 看不到 IROM），IROM 经 merge-bin 按 0x10020 独立合入 |
-| **GCC 会为零开销 loop 指令发射代码，但 QEMU 的 esp32s3 核心配置未实现该选项**（工具链 core-isa.h `XCHAL_HAVE_LOOPS` 为 undef，dynconfig 却放行）——执行即随机错值/非法指令，表现为 memset/strcmp/扫描函数间歇性出错（M2 的 strcmp 崩溃、M3.5 的 ack 窗口误命中皆此因） | 内核全部计数循环用 **volatile 索引**禁掉该优化（lib_shim.c/sched.c/console.c/msg.c 有统一注释）；新增代码含 for/while 计数循环时同此写法，或构建后 `objdump -d | grep loop` 验证为 0 |
+| **MMU 未映射表项语义【E-03 判定实验 2026-10-16】**：复位后未写表项为 0x4000（bit14=invalid，非 0）；**取指**访问 invalid 页 → EXCCAUSE=28（InstrPifDataError）异常、EPC 精确（野 PC 会被捕获，不会随机执行）；**数据读**访问 invalid 页 → **不 fault**，返回毒值 0xdeadbeef（QEMU 特有；真机 TRM 应为总线错误——真机排障勿以 QEMU 行为类推）。另：QEMU 表项模型为 32 位宽（半字读有复制别名），真机 TRM 为 16 位表项——boot.S 的 32 位步进写在 QEMU 正确，真机会把 entry[1] 误写为 0(有效@页0)，**真机带板需改为 16 位写并复核**（console `mmutest dump|load|jump` 为常备探针） | 依赖取指 fault 兜野 PC 可行；不要依赖数据读 fault；野指针读会得到 0xdeadbeef 静默垃圾 |
+| ~~GCC 会为零开销 loop 指令发射代码，但 QEMU 的 esp32s3 核心配置未实现该选项~~ **【已证伪，E-01 判定实验 2026-10-16】**：手写 `loopnez` 长循环（console `looptest` 命令）在开机即测、数百次任务切换后、RX 中断风暴打断循环体三场景共 2250 轮零失配；镜像中编译器生成的 3 条 `loop` 也在测试路径长期正常（回归用例 `test_loop_instruction`）。历史误诊的 volatile 索引纪律正确无害，保留未动；M2 strcmp 崩溃 / M3.5 ack 误命中真因未明（已排除 loop 指令），若复发需另查 | 无需规避；`looptest [rounds]` 命令与 `test_loop_instruction` 用例为常备回归探针 |
 
 另有两坑在构建侧（已固化进 build.py/链接脚本，详见代码注释）：
 - Xtensa `l32r` 字面量必须在指令之前且 4 字节对齐——链接脚本把 `.literal`

@@ -14,8 +14,9 @@
  *   - 度量：used/free/largest、最大使用水位、alloc/free/fail/fault 计数
  *   - 追踪：TR_MEM_ALLOC/FREE/FAULT 事件入追踪环（分配流水可回放）
  *
- * 约束继承：所有计数循环 volatile 索引（QEMU 不支持 GCC 的零开销
- * loop 指令，见 lib_shim.c 注释）；热路径无除法。
+ * 约束继承：计数循环 volatile 索引为历史纪律（E-01 实验已证伪
+ * "QEMU 不支持 loop 指令"，见 lib_shim.c 注释，新代码无需沿用）；
+ * 热路径无除法。
  *
  * API 语义：alloc 失败返回 NULL 并计 fail（永不挂起）；free 非法指针
  * 或 canary 破坏计 fault 并吞掉（不崩溃）；size 0 按 1 处理。

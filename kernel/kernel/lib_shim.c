@@ -4,10 +4,13 @@
 #include "lib_shim.h"
 
 /*
- * 注意：所有循环用 volatile 索引——禁掉 GCC 零开销 loop 指令。
- * 该 QEMU 在任务切换/手动异常退出后 loop 指令行为异常，会导致
- * memcpy/strcmp 等随机出错（M3.5 排查实锤：结构体赋值经 memcpy
- * 拷坏消息，回执窗口全部误命中）。全内核热循环统一此写法。
+ * 历史说明：循环用 volatile 索引源于 M3.5 的一次误诊（当时认定该 QEMU
+ * 不支持零开销 loop 指令）。2026-10-16 判定实验（E-01，console 的
+ * looptest 命令 + test_loop_instruction 用例）证伪：loopnez 长循环在
+ * 数百次任务切换与 RX 中断风暴下 2000+ 轮零失配，镜像中编译器生成
+ * 的 3 条 loop 指令也在测试路径上长期正常执行。M2 strcmp 崩溃 /
+ * M3.5 ack 窗口误命中的真因未明（已排除 loop），留待复发时重查。
+ * 现存 volatile 写法正确无害，保持不动；新代码无需沿用。
  */
 
 void *memcpy(void *dst, const void *src, size_t n)

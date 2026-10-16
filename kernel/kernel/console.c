@@ -142,7 +142,7 @@ static void cmd_help(void)
     uart_puts("commands: help, ping, echo <text>, info, tickstat, trace [n], "
               "tasks, taskdemo <mode>, sleep <ms>, msgdemo <mode> [n], "
               "msgstat, memstat, memtest <mode> [n], pal, drivers, "
-              "fs <sub>, mcp on|off, flood <n>, crash\r\n"
+              "fs <sub>, mcp on|off, flood <n>, crash, looptest [n]\r\n"
               "  fs: ls|write <n> <t>|cat <n>|rm <n>|mkfs|df\r\n"
               "  MCP: lines starting with '{' are JSON-RPC\r\n");
 }
@@ -439,6 +439,147 @@ static void cmd_crash(void)
     asm volatile("ill"); /* 触发非法指令异常，走通用异常向量 */
 }
 
+/* ---------- E-02 判定实验：可控 rfe 恢复（defect-report.md） ----------
+ * 质疑对象：docs/qemu-testing.md 旧结论"EPS1 不可访问 → rfe 无法可控恢复"。
+ * 实验手法：记录恢复点 PC 后执行 ill；异常分发（exception.c）识别
+ * 哨兵后把 EPC1 设为恢复点、把命令行指定的候选 SR 设为异常前健康 PS，
+ * 走既有 RESTORE_CALL0_REGS+rfe 返回。候选：161（标准 EPS1 编号；
+ * binutils 未导出 eps1 名但数字可用）与 194（binutils 命名为 eps2；
+ * 193 在本配置非有效 SR，汇编器拒收）。 */
+
+volatile int g_e2_active;
+volatile uint32_t g_e2_resume_pc;
+volatile uint32_t g_e2_ps_before;
+volatile uint32_t g_e2_result;
+volatile uint32_t g_e2_eps_sr;
+
+static void cmd_rfetest(const char *arg)
+{
+    unsigned sr = parse_dec(arg, 161u);
+    uint32_t ps_before;
+    asm volatile("rsr.ps %0" : "=r"(ps_before));
+    g_e2_ps_before = ps_before;
+    g_e2_result = 0xA11CE2E2u; /* 哨兵：未被恢复点改写即失败 */
+    uart_puts("[POTATO][E2] rfe test: ill -> handler sets EPC1/EPS -> rfe\r\n");
+    potato_printf("[POTATO][E2] candidate EPS sr=%u ps_before=0x%x\r\n",
+                  sr, ps_before);
+    g_e2_eps_sr = sr;
+    asm volatile(
+        "movi    a8, 1f\n\t"      /* 恢复点标签地址 */
+        "s32i    a8, %0, 0\n\t"
+        "movi.n  a9, 1\n\t"
+        "s32i    a9, %1, 0\n\t"   /* g_e2_active = 1 */
+        "ill\n"                   /* 触发通用异常（Kernel 向量） */
+        "1:\n\t"                  /* rfe 成功则回到这里 */
+        "movi.n  a9, 7\n\t"
+        "s32i    a9, %2, 0\n\t"   /* g_e2_result = 7 */
+        :
+        : "r"(&g_e2_resume_pc), "r"(&g_e2_active), "r"(&g_e2_result)
+        : "a8", "a9", "memory");
+    if (g_e2_result == 7u) {
+        uint32_t ps_now;
+        asm volatile("rsr.ps %0" : "=r"(ps_now));
+        potato_printf("[POTATO][E2] RESUMED at label, ps_before=0x%x "
+                      "ps_now=0x%x\r\n", g_e2_ps_before, ps_now);
+        if (ps_now == g_e2_ps_before) {
+            uart_puts("[POTATO][E2] PASS (rfe restored PS from candidate sr)\r\n");
+        } else {
+            uart_puts("[POTATO][E2] PARTIAL (resumed but PS not restored)\r\n");
+        }
+    } else {
+        uart_puts("[POTATO][E2] FAIL (resume point not reached)\r\n");
+    }
+}
+
+/* ---------- E-01 判定实验：loop 指令真相（defect-report.md） ----------
+ * 非常量计数循环若编译为 Xtensa 零开销 loop 指令，其正确性依赖
+ * LBEG/LEND/LCOUNT 在切换/异常路径的保存恢复。此处成对运行
+ * 非 volatile 实现（生成 loop）与 volatile 参照实现（禁 loop），
+ * 每轮 yield 一次覆盖切换路径，结果不一致即说明 loop 不可用。 */
+
+/* ---------- E-01 判定实验：loop 指令真相（defect-report.md） ----------
+ * 手写零开销循环（loopnez），与编译器为 cmd_fs/msgdemo 生成的 loop
+ * 指令同一机制：循环体执行期间 LBEG/LEND/LCOUNT 依赖
+ *   - 上下文切换路径（switch.S 保存/恢复 loop 寄存器）
+ *   - UART level-2 中断路径（vectors.S SAVE/RESTORE_CALL0_REGS）
+ * 任一路径恢复有误，结果即错。与 volatile 参照实现逐轮比对。
+ * （编译器只为"常量上界+双条件扫描"形态发 loop，此处手写以保证覆盖） */
+
+static uint32_t loopy_asm_sum(uint32_t n)
+{
+    uint32_t sum, i;
+    /* lbeg/lend/lcount 对编译器透明（call0 ABI：编译器自生成 loop 指令时
+     * 同样不建模这三个寄存器，中断/切换路径负责保存恢复），故无需 clobber */
+    asm volatile(
+        "movi.n  %[i], 0\n\t"
+        "movi.n  %[sum], 0\n\t"
+        "loopnez %[n], 2f\n"
+        "1:\n\t"
+        "add.n   %[sum], %[sum], %[i]\n\t"
+        "addi.n  %[i], %[i], 1\n\t"
+        "2:\n\t"
+        : [sum] "=&r"(sum), [i] "=&r"(i)
+        : [n] "r"(n));
+    return sum;
+}
+
+/* volatile 参照实现：不走 loop 指令，逐次访存计数 */
+static uint32_t loopy_sum_ref(uint32_t n)
+{
+    uint32_t sum = 0;
+    for (volatile uint32_t i = 0; i < n; i++) {
+        sum += i;
+    }
+    return sum;
+}
+
+static void cmd_looptest(const char *arg)
+{
+    unsigned rounds = parse_dec(arg, 200u);
+    uint32_t mism = 0;
+    potato_printf("[POTATO][E1] looptest start rounds=%u\r\n", rounds);
+    for (volatile unsigned r = 0; r < rounds; r++) {
+        uint32_t n = 5000u + (r % 50u) * 100u; /* 长循环：中途大概率被 RX IRQ 打断 */
+        uint32_t got = loopy_asm_sum(n);
+        uint32_t exp = loopy_sum_ref(n);
+        if (got != exp || exp != n * (n - 1u) / 2u) {
+            mism++;
+        }
+        pot_task_yield(); /* 每轮切换一次：覆盖多次切换后的 loop 状态 */
+    }
+    potato_printf("[POTATO][E1] looptest done rounds=%u mismatches=%u\r\n",
+                  rounds, mism);
+}
+
+/* ---------- E-03 判定实验：MMU 未映射表项语义（defect-report.md） ----------
+ * boot.S 只写表项 0.._irom_pages-1，其余保持复位值。判定问题：
+ * 复位值 0 是"invalid"（访问即 fault）还是"有效映射物理页 0"
+ * （野指针静默读到引导镜像字节）？另取证 boot.S 32 位步进写表
+ * 是否把 entry[1] 顺手写成 0。 */
+
+static void cmd_mmutest(const char *arg)
+{
+    volatile uint16_t *mmu = (volatile uint16_t *)0x600C5000u;
+    potato_printf("[POTATO][E3] mmu[0]=0x%x [1]=0x%x [2]=0x%x [3]=0x%x "
+                  "[32]=0x%x [511]=0x%x\r\n",
+                  mmu[0], mmu[1], mmu[2], mmu[3], mmu[32], mmu[511]);
+    if (strcmp(arg, "load") == 0) {
+        /* 0x42020000 = 虚拟页 32：boot.S 从未写过该表项 */
+        volatile uint32_t *p = (volatile uint32_t *)0x42020000u;
+        uint32_t v = *p;
+        potato_printf("[POTATO][E3] load 0x42020000 -> 0x%x (no fault)\r\n", v);
+        return;
+    }
+    if (strcmp(arg, "jump") == 0) {
+        uart_puts("[POTATO][E3] jumping to 0x42020000 ...\r\n"); /* TX 轮询逐字节排空，返回即基本发完 */
+        uint32_t target = 0x42020000u;
+        asm volatile("jx %0" :: "r"(target) : "memory");
+        uart_puts("[POTATO][E3] returned?? (unexpected)\r\n");
+        return;
+    }
+    uart_puts("[POTATO][E3] mmutest dump|load|jump\r\n");
+}
+
 static void cmd_dispatch(char *line)
 {
     /* MCP 传输路由：'{' 开头的行投递消息基座（M6） */
@@ -544,6 +685,18 @@ static void cmd_dispatch(char *line)
     }
     if (strcmp(line, "crash") == 0) {
         cmd_crash();
+        return;
+    }
+    if (strcmp(line, "looptest") == 0) {
+        cmd_looptest(arg);
+        return;
+    }
+    if (strcmp(line, "rfetest") == 0) {
+        cmd_rfetest(arg);
+        return;
+    }
+    if (strcmp(line, "mmutest") == 0) {
+        cmd_mmutest(arg);
         return;
     }
     potato_printf("[POTATO] unknown command: %s (try 'help')\r\n", line);
