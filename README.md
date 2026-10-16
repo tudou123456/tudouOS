@@ -6,7 +6,8 @@ QMP 测试台自动验收；同一份镜像可用 esptool 直接烧入真机开�
 
 > 当前阶段：**M6 已完成**——支柱1 全链路收官：MCP 协议适配器
 > （UART 行传输→消息基座→JSON-RPC 工具分发）+ potfs 文件系统 +
-> 串口 Shell，测试台 **37 用例全绿**（M1~M6）。内核主体 flash XIP 执行。产品定位与四大核心支柱（内核原生 MCP
+> 串口 Shell，测试台 **48 用例全绿**（M1~M6 + 缺陷修复回归）。内核主体
+> flash XIP 执行；tick 中断驱动（v5，独立于任务检查点）。产品定位与四大核心支柱（内核原生 MCP
 > 消息总线 / 仿真硬件双端同源 / 内核可观测 / AI 交互低抖动调度）见
 > [docs/architecture.md](docs/architecture.md)，MCP 消息基座设计见
 > [docs/mcp-bus-design.md](docs/mcp-bus-design.md)。
