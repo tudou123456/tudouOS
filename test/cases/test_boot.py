@@ -4,7 +4,9 @@
 证明走了完整的 ROM→镜像 启动链路。
 """
 
+import re
 import time
+from pathlib import Path
 
 from test.serial_tap import SerialTimeoutError
 
@@ -13,11 +15,21 @@ VERSION_LINE = r"\[POTATO\] tudouOS v(\d+\.\d+\.\d+)"
 READY_LINE = r"\[POTATO\] READY"
 
 
+def kernel_version():
+    """从 potato.h 解析版本号（单一真源），避免测试硬编码与内核版本脱节。"""
+    hdr = Path(__file__).resolve().parents[2] / "kernel" / "include" / "potato.h"
+    m = re.search(r'#define\s+POTATO_VERSION\s+"(\d+\.\d+\.\d+)"',
+                  hdr.read_text(encoding="utf-8"))
+    assert m, f"未能从 {hdr} 解析 POTATO_VERSION"
+    return m.group(1)
+
+
 def test_boot_banner(ctx):
     """完整启动链路：ROM 日志 → 横幅/版本 → 内存布局 → READY。"""
     ctx.serial.expect(ROM_BANNER, timeout=20)
     m = ctx.serial.expect(VERSION_LINE, timeout=10)
-    assert m.group(1) == "0.7.0", f"版本号异常: {m.group(1)}"
+    assert m.group(1) == kernel_version(), \
+        f"版本号异常: 串口={m.group(1)} potato.h={kernel_version()}"
     ctx.serial.expect(r"\[POTATO\] build .+", timeout=5)
     ctx.serial.expect(
         r"\[POTATO\] mem iram=0x[0-9a-f]+-0x[0-9a-f]+"
@@ -38,7 +50,8 @@ def test_ping_pong(ctx):
     ctx.serial.send("echo hello potato")
     ctx.serial.expect(r"hello potato", timeout=5)
     ctx.serial.send("info")
-    ctx.serial.expect(r"\[POTATO\] info: tudouOS v0\.7\.0", timeout=5)
+    ctx.serial.expect(r"\[POTATO\] info: tudouOS v" + re.escape(kernel_version()),
+                      timeout=5)
 
 
 def test_qmp_reset(ctx):

@@ -2,8 +2,9 @@
 
 产物（均在 build/ 下）:
   kernel.elf        带符号的内核 ELF（GDB 调试用）
-  potato_boot.bin   ESP 镜像格式内核（ROM 可直接加载）
-  flash_image.bin   4MB flash 镜像（QEMU 用，也可整体烧入真机）
+  potato_boot.bin   ESP 镜像格式引导镜像（只含 RAM 段，flash 偏移 0x0）
+  irom.bin          flash XIP 段（必须与引导镜像分开烧到 0x10020）
+  flash_image.bin   4MB 全量 flash 镜像（QEMU 直接使用；真机可整体烧录）
 
 真机烧录偏移（二级引导偏移）会在构建结束时打印，见 README。
 """
@@ -27,6 +28,8 @@ ELF = os.path.join(BUILD, "kernel.elf")
 BOOT_BIN = os.path.join(BUILD, "potato_boot.bin")
 IROM_BIN = os.path.join(BUILD, "irom.bin")
 FLASH_IMG = os.path.join(BUILD, "flash_image.bin")
+# .irom_text 在 flash 的装载地址（tudou.ld 的 AT(0x00010020)：MMU 页 1 + 段内 0x20）
+IROM_FLASH_OFFSET = 0x10020
 
 PROBE_SRC = "int probe(void) { return 0; }\n"
 
@@ -154,7 +157,19 @@ def main():
     subprocess.run([sys.executable, "-m", "esptool", "--chip", "esp32s3", merge,
                     "-o", FLASH_IMG, pad, "4MB",
                     format(offset, "#x"), BOOT_BIN,
-                    "0x10020", IROM_BIN], check=True, shell=False, env=env)
+                    hex(IROM_FLASH_OFFSET), IROM_BIN], check=True, shell=False, env=env)
+
+    # ---- 6. 自检：flash 镜像的 IROM 区段必须与 irom.bin 逐字节一致 ----
+    # 防止"烧录提示"与镜像布局再次脱节（M5 后 C 代码在 flash 0x10020 起）
+    print("[6] 自检 flash 镜像 IROM 区段 ...")
+    from pathlib import Path
+    img = Path(FLASH_IMG).read_bytes()
+    seg = Path(IROM_BIN).read_bytes()
+    region = img[IROM_FLASH_OFFSET:IROM_FLASH_OFFSET + len(seg)]
+    if region != seg:
+        print(f"自检失败: flash_image.bin[{IROM_FLASH_OFFSET:#x}..] 与 irom.bin 不一致")
+        return 1
+    print(f"   OK ({len(seg)} 字节 @ {IROM_FLASH_OFFSET:#x} 逐字节一致)")
 
     print()
     print("构建完成:")
@@ -162,8 +177,11 @@ def main():
     print("  " + BOOT_BIN + "  (flash 偏移 " + hex(offset) + ")")
     print("  " + FLASH_IMG + "  (4MB, QEMU 直接使用)")
     print()
-    print("真机烧录: esptool --chip esp32s3 write-flash " + hex(offset) +
-          " build/potato_boot.bin")
+    print("真机烧录（M5 起 C 代码在 flash 0x10020 起，两段都要烧，只烧引导镜像必崩）:")
+    print("  esptool --chip esp32s3 --port COMx --baud 921600 \\")
+    print("      write-flash " + hex(offset) + " build/potato_boot.bin" +
+          " 0x10020 build/irom.bin")
+    print("  （或整体烧 4MB 镜像: esptool write-flash 0x0 build/flash_image.bin）")
     print("下一步:")
     print("  交互运行:  python qemu/run_qemu.py")
     print("  自动测试:  python -m test.runner")

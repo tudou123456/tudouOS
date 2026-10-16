@@ -53,12 +53,21 @@ python -m test.runner      # QMP 自动验收（4 个用例 + 日志落盘）
 
 ## 烧录真机（ESP32-S3 开发板）
 
+M5 起内核主体在 flash XIP 执行，**两段都要烧**（只烧引导镜像会启动即崩）：
+
 ```bash
+# 推荐：两段分开烧（快）
 esptool --chip esp32s3 --port COMx --baud 921600 \
-    write-flash 0x0 build/potato_boot.bin
+    write-flash 0x0 build/potato_boot.bin 0x10020 build/irom.bin
+
+# 或整体烧 4MB 镜像（省心，约 45s+）
+esptool --chip esp32s3 --port COMx --baud 921600 \
+    write-flash 0x0 build/flash_image.bin
 ```
 
-（0x0 为 S3 二级引导偏移，构建结束也会打印。串口 115200-8N1。）
+（0x0 为 S3 二级引导偏移；0x10020 为 IROM 段装载地址，与链接脚本
+`tudou.ld` 的 `AT(0x00010020)` 一致，构建结束也会打印，且构建自带
+"flash 镜像 IROM 区段与 irom.bin 逐字节一致"自检。串口 115200-8N1。）
 
 ## 测试用例（M1~M6 验收，37 个全绿）
 

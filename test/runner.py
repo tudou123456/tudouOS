@@ -145,14 +145,15 @@ def discover_cases():
     return cases
 
 
-def dump_logs(vm, case_name, error):
+def dump_logs(vm, case_name, error, tb=None):
     if vm.serial is not None:
         log_path(case_name, ".serial.log").write_text(vm.serial.text, encoding="utf-8")
     events = vm.qmp.events if vm.qmp is not None else []
     lines = "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in events)
     log_path(case_name, ".qmp-events.json").write_text(lines, encoding="utf-8")
     if error is not None:
-        log_path(case_name, ".error.log").write_text(traceback.format_exc(),
+        # traceback 必须在 except 块里抓（事后 format_exc 只剩 NoneType: None）
+        log_path(case_name, ".error.log").write_text(error + "\n" + (tb or ""),
                                                      encoding="utf-8")
 
 
@@ -187,13 +188,15 @@ def main():
         vm = VMInstance(qemu, args.flash, name)
         t0 = time.monotonic()
         error = None
+        tb = None
         try:
             vm.start()
             fn(CaseContext(vm.serial, vm.qmp, vm))
         except Exception as e:  # noqa: BLE001
             error = f"{type(e).__name__}: {e}"
+            tb = traceback.format_exc()
         finally:
-            dump_logs(vm, name, error)
+            dump_logs(vm, name, error, tb)
             vm.stop()
         secs = time.monotonic() - t0
         if error is None:
