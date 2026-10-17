@@ -266,8 +266,85 @@ unsigned trace_export_since(uint32_t *cursor, unsigned max_n)
     return n;
 }
 
+/* ---- M8 重要事件副环导出（行尾带 "imp":1 供分析器区分可靠历史） ---- */
+
+static void imp_snapshot(uint32_t *total, uint16_t *head)
+{
+    uint32_t ps = trace_lock();
+    *total = g_imp_seq;
+    *head = g_imp_head;
+    trace_unlock(ps);
+}
+
+static unsigned export_imp_range(uint32_t from_seq, unsigned max_n)
+{
+    uint32_t total;
+    uint16_t head;
+    imp_snapshot(&total, &head);
+
+    uint32_t avail = (total < POT_TRACE_IMP_CAPACITY) ? total : POT_TRACE_IMP_CAPACITY;
+    uint32_t oldest = total - avail;
+    if (from_seq < oldest) {
+        from_seq = oldest;
+    }
+    if (from_seq >= total) {
+        return 0u;
+    }
+    unsigned n = (unsigned)(total - from_seq);
+    if (max_n != 0u && n > max_n) {
+        n = max_n;
+    }
+
+    for (unsigned i = n; i > 0u; i--) {
+        uint16_t idx = (uint16_t)((uint16_t)(head - i) & (POT_TRACE_IMP_CAPACITY - 1));
+        char line[176];
+        pot_sb_t b;
+        pot_sb_init(&b, line, sizeof(line));
+        pot_sb_ch(&b, '{');
+        pot_sb_kv_u32(&b, "seq", total - i, 0);
+        pot_sb_kv_u32(&b, "t", g_imp_ring[idx].t, 1);
+        pot_sb_kv_str(&b, "ev", trace_event_name(g_imp_ring[idx].type), 1);
+        pot_sb_kv_u32(&b, "a", g_imp_ring[idx].a, 1);
+        pot_sb_kv_u32(&b, "b", g_imp_ring[idx].b, 1);
+        pot_sb_kv_u32(&b, "imp", 1, 1);
+        pot_sb_ch(&b, '}');
+        potato_printf("[POTATO][TRJ] %s\r\n", line);
+    }
+    return n;
+}
+
+unsigned trace_export_important(unsigned max_n)
+{
+    if (max_n == 0u) {
+        max_n = POT_TRACE_IMP_CAPACITY;
+    }
+    return export_imp_range(0u, max_n);
+}
+
+unsigned trace_export_important_since(uint32_t *cursor, unsigned max_n)
+{
+    if (cursor == NULL) {
+        return 0u;
+    }
+    uint32_t total = trace_important_total();
+    uint32_t avail = (total < POT_TRACE_IMP_CAPACITY) ? total : POT_TRACE_IMP_CAPACITY;
+    uint32_t oldest = total - avail;
+    uint32_t from = *cursor;
+    if (from < oldest) {
+        from = oldest;
+    }
+    unsigned n = export_imp_range(from, max_n);
+    if (n != 0u) {
+        *cursor = from + n;
+    } else if (*cursor < oldest) {
+        *cursor = oldest;
+    }
+    return n;
+}
+
 uint32_t trace_meta_json(char *buf, uint32_t cap, int stream_on)
-{    pot_sb_t b;
+{
+    pot_sb_t b;
     pot_sb_init(&b, buf, cap);
     pot_sb_ch(&b, '{');
     pot_sb_kv_u32(&b, "total", g_seq, 0);

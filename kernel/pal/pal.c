@@ -55,7 +55,7 @@ pot_tick_mode_t pot_pal_tick_mode(void)
 
 uint32_t pot_pal_cpu_hz(void)
 {
-    return 240000000u; /* 真机默认 240MHz（M5 真机接入时改为运行时读取） */
+    return tick_cpu_hz(); /* D-26：真机=运行时标定值（与 tick 周期同源） */
 }
 
 void pot_pal_early_init(void)

@@ -76,10 +76,22 @@ void uart0_irq_handler(void)
     }
 }
 
+/* M7：输出抽头——非空时每个输出字节额外送一份（远程 MCP 通道用它抓
+ * {"jsonrpc"} 响应行）。抽头不得打印，否则自激。 */
+static void (*g_uart_sink)(char);
+
+void uart_set_sink(void (*fn)(char))
+{
+    g_uart_sink = fn;
+}
+
 void uart_putc(char c)
 {
     if (c == '\n') {
         uart_putc('\r');
+    }
+    if (g_uart_sink != 0) {
+        g_uart_sink(c);
     }
     /* 等 TX FIFO 排空再写，对 FIFO 深度不敏感 */
     while (ST_TXFIFO_CNT(mmio_read(UART_STATUS)) != 0u) {

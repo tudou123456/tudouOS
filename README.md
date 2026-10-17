@@ -2,12 +2,18 @@
 
 面向 **ESP32-S3** 的自研嵌入式操作系统：自研土豆内核（C + Xtensa 汇编），
 研发检验全程跑在 QEMU（乐鑫官方分支，`-machine esp32s3`），由 Python
-QMP 测试台自动验收；同一份镜像可用 esptool 直接烧入真机开发板。
+QMP 测试台自动验收；`--platform hw` 产出全 RAM 单镜像，已用 esptool
+在 ESP32-S3 开发板上带板验证（启动、命令面、M9 双核全流程）。
 
-> 当前阶段：**M6 已完成**——支柱1 全链路收官：MCP 协议适配器
-> （UART 行传输→消息基座→JSON-RPC 工具分发）+ potfs 文件系统 +
-> 串口 Shell，测试台 **48 用例全绿**（M1~M6 + 缺陷修复回归）。内核主体
-> flash XIP 执行；tick 中断驱动（v5，独立于任务检查点）。产品定位与四大核心支柱（内核原生 MCP
+> 当前阶段：**M9 已完成**（M1~M9 全部交付）。最新增量：M7 以太网 +
+> 远程 MCP 通道（QEMU open_eth，`docs/ethernet.md`）、M8 可观测体系
+> （JSONL 导出/健康快照/注入/`tools/ai_analysis.py`，`docs/observability.md`）、
+> M9 双核 SMP（CPU1 启动/核间中断/负载均衡，`docs/smp.md`）。
+> QEMU 测试台 **67 用例全绿**（M1~M9 + 缺陷修复回归）。
+> 真机带板验证已完成（2026-10-17：RAM-only 布局稳定启动、CPU1 上线、
+> IPI/绑核/负载均衡实测通过，`docs/hardware-bringup.md`）。
+> QEMU 构建走 flash XIP 执行；真机构建默认全 RAM（代码 IRAM、只读数据 DRAM）；
+> tick 中断驱动（v5，独立于任务检查点）。产品定位与四大核心支柱（内核原生 MCP
 > 消息总线 / 仿真硬件双端同源 / 内核可观测 / AI 交互低抖动调度）见
 > [docs/architecture.md](docs/architecture.md)，MCP 消息基座设计见
 > [docs/mcp-bus-design.md](docs/mcp-bus-design.md)。
@@ -47,30 +53,35 @@ python -m pip install esptool  # 缺 esptool 时
 ## 快速开始
 
 ```bash
-python tools/build.py      # 编译内核 → ESP 镜像 → 4MB flash 镜像
-python qemu/run_qemu.py    # 交互运行（串口直连终端，可敲 ping/info/echo）
-python -m test.runner      # QMP 自动验收（4 个用例 + 日志落盘）
+python tools/build.py                # QEMU 镜像：编译内核 → ESP 镜像 → 4MB flash 镜像
+python tools/build.py --platform hw  # 真机镜像：全 RAM 单镜像 potato_boot_hw.bin
+python qemu/run_qemu.py              # 交互运行（串口直连终端，可敲 ping/info/echo）
+python -m test.runner                # QMP 自动验收（67 个用例 + 日志落盘）
 ```
 
-## 烧录真机（ESP32-S3 开发板）
+## 构建真机镜像 / 烧录（ESP32-S3 开发板）
 
-M5 起内核主体在 flash XIP 执行，**两段都要烧**（只烧引导镜像会启动即崩）：
+真机默认走**全 RAM 布局**：代码进 IRAM、只读数据进 DRAM，ROM 直接搬两段 RAM
+后跳入内核，不依赖 flash XIP/icache（带板验证见 `docs/hardware-bringup.md`）。
 
 ```bash
-# 推荐：两段分开烧（快）
+python tools/build.py --platform hw     # → build/kernel_hw.elf + build/potato_boot_hw.bin
 esptool --chip esp32s3 --port COMx --baud 921600 \
-    write-flash 0x0 build/potato_boot.bin 0x10020 build/irom.bin
-
-# 或整体烧 4MB 镜像（省心，约 45s+）
-esptool --chip esp32s3 --port COMx --baud 921600 \
-    write-flash 0x0 build/flash_image.bin
+    write-flash 0x0 build/potato_boot_hw.bin
 ```
 
-（0x0 为 S3 二级引导偏移；0x10020 为 IROM 段装载地址，与链接脚本
-`tudou.ld` 的 `AT(0x00010020)` 一致，构建结束也会打印，且构建自带
-"flash 镜像 IROM 区段与 irom.bin 逐字节一致"自检。串口 115200-8N1。）
+- 只需烧 **一段**（`0x0`，S3 二级引导偏移），约 82KB；构建结束会打印地址与大小。
+- 串口 115200-8N1；启动后应看到 `banner v0.7.0` 和 `[POTATO] READY`。
+- 调试启动阶段可在构建时加 `TUDOU_BOOT_TRACE=1`（串口打阶段字符
+  `S/T/U/W/C/D/V` 与 `0..E`）；改该变量后需 `--clean`。
+- `--platform hw --xip` 保留旧的 flash XIP 两段烧录实验路径
+  （真机 0x42 取指目前不可用，仅供继续排查）。
+- QEMU 镜像（`python tools/build.py` 默认）仍为 XIP 布局，供测试台使用。
 
-## 测试用例（M1~M6 验收，37 个全绿）
+## 测试用例（M1~M9 验收，67 个全绿）
+
+下表为 M1~M6 核心用例；M7/M8/M9 用例（19 个）见各自文档与
+`test/cases/test_m7*.py`、`test_m8*.py`、`test_m9*.py`、`test_build_hw_platform.py`。
 
 | 用例 | 验证 |
 | --- | --- |
@@ -131,6 +142,19 @@ exhaust|churn|off`（分配回归/碎片合并/越界注入/耗尽恢复/soak �
 （potfs 操作）、`mcp on|off`（MCP 代理生命周期）；**以 `{` 开头的输入行
 自动作为 JSON-RPC 请求**投递消息基座处理并返回 JSON 响应——外部 Agent
 （如测试台/AI）经 UART 即可调用 7 个内核工具。
+
+**网络命令**（M7）：`net [arp|link down|up|ip <a.b.c.d> [gw]]`、
+`ping <a.b.c.d>`（ICMP echo）、`netmcp [dump|test|port <p>|peer <a.b.c.d> <port>]`
+（UDP 远程 MCP 通道：纪元/序号/回执/去重/重同步，详见
+[docs/ethernet.md](docs/ethernet.md)）。
+
+**可观测命令**（M8）：`trace [n]|jsonl [n]|imp [n]|stream on|off|pump|meta|health`、
+`health`（单行健康快照）、`obs panic`、`inject leak|hang|spin|off [arg]`
+（注入锚点 + AI 分析器 `tools/ai_analysis.py`，详见
+[docs/observability.md](docs/observability.md)）。
+
+**双核命令**（M9）：`smp [stat|start|ipi <n>|spawn <cpu|any> <n>|work|preempt on|off|selftest]`
+（默认单核，`smp start` 拉起 CPU1；详见 [docs/smp.md](docs/smp.md)）。
 
 ## 常见问题
 

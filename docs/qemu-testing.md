@@ -21,7 +21,9 @@ python -m test.runner
   顺序匹配并推进位置，避免误匹配旧输出）。
 - `test/runner.py`：运行器（用例发现、VM 生命周期、日志落盘、汇总）。
 - `test/cases/test_boot.py`：M1 验收用例（boot_banner / ping_pong /
-  qmp_reset / qmp_stop_cont）。
+  qmp_reset / qmp_stop_cont）；后续里程碑各自新增 `test_m2*`…`test_m6*`，
+  以及 `test_m7*.py`（以太网 6 例）、`test_obs.py`（M8 可观测 6 例）、
+  `test_m9*.py`（SMP 6 例）、`test_build_hw.py`（hw 构建门禁 1 例）。
 
 ## 常用命令
 

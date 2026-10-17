@@ -158,7 +158,7 @@ static int deq(pot_channel_t *ch, pot_msg_t *out)
 int pot_msg_send(pot_channel_t *ch, pot_msg_t *m, uint32_t timeout_ms)
 {
     uint32_t deadline = pot_sched_now() + timeout_ms;
-    m->sender = pot_current;
+    m->sender = pot_task_self(); /* M9：按本核取当前任务（等价单核 pot_current） */
     m->deadline = deadline;
 
     uint32_t backoff = POT_MSG_RETRY_BASE_MS;

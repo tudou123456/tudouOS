@@ -1,6 +1,7 @@
 #include <stdint.h>
 
 #include "intc.h"
+#include "smp.h"
 #include "task.h"
 #include "tick.h"
 #include "time.h"
@@ -24,8 +25,9 @@ extern uint32_t pot_task_ps; /* sched.c：任务常态 PS */
 #define FRAME_WORDS 22 /* 88 字节，见 switch.S/vectors.S 帧布局 */
 
 /* 任务注册表：main/idle/动态任务全登记，tasks 命令遍历打印。
- * D-12：登记前去重（TCB 复用时不得重复追加），表满计数告警 */
-#define REG_MAX 16
+ * D-12：登记前去重（TCB 复用时不得重复追加），表满计数告警。
+ * M9：SMP 演示任务/CPU1 idle 也登记，容量 16→24（de） */
+#define REG_MAX 24
 static pot_task_t *g_registry[REG_MAX];
 static int g_reg_n;
 static uint32_t g_reg_overflow; /* 登记溢出计数（tasks 命令可见，应为 0） */
@@ -79,11 +81,15 @@ uint32_t pot_task_stack_unused(const pot_task_t *t)
     return n;
 }
 
-int pot_task_create(pot_task_t *tcb, const char *name, pot_task_class_t cls,
-                    pot_task_fn_t fn, void *arg,
-                    uint32_t *stack, uint32_t stack_words)
+static int task_create_common(pot_task_t *tcb, const char *name,
+                              pot_task_class_t cls, pot_task_fn_t fn, void *arg,
+                              uint32_t *stack, uint32_t stack_words,
+                              int cpu_affinity)
 {
     if (tcb == 0 || stack == 0 || stack_words < FRAME_WORDS + 8) {
+        return -1;
+    }
+    if (cpu_affinity < -1 || cpu_affinity >= POT_SMP_MAX_CPUS) {
         return -1;
     }
 
@@ -112,14 +118,34 @@ int pot_task_create(pot_task_t *tcb, const char *name, pot_task_class_t cls,
     tcb->stop_req = 0;
     tcb->stk_lo = stack;
     tcb->stk_words = stack_words;
+    tcb->cpu = -1;
+    tcb->affinity = cpu_affinity;
 
     pot_task_register(tcb);
     sched_static_enqueue(tcb);
     return 0;
 }
+
+int pot_task_create(pot_task_t *tcb, const char *name, pot_task_class_t cls,
+                    pot_task_fn_t fn, void *arg,
+                    uint32_t *stack, uint32_t stack_words)
+{
+    /* 默认跟随 CPU0：M9 前所有任务都在 CPU0 上跑，保持单核语义不变；
+     * 只有显式 pot_task_create_aff(..., -1) 的任务才允许被负载均衡迁移。 */
+    return task_create_common(tcb, name, cls, fn, arg, stack, stack_words, 0);
+}
+
+int pot_task_create_aff(pot_task_t *tcb, const char *name, pot_task_class_t cls,
+                        pot_task_fn_t fn, void *arg,
+                        uint32_t *stack, uint32_t stack_words,
+                        int cpu_affinity)
+{
+    return task_create_common(tcb, name, cls, fn, arg, stack, stack_words,
+                              cpu_affinity);
+}
 pot_task_t *pot_task_self(void)
 {
-    return pot_current;
+    return pot_sched_self(); /* M9：按 THREADPTR 取本核当前任务 */
 }
 
 void pot_task_yield(void)

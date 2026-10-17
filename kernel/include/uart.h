@@ -16,4 +16,7 @@ uint32_t uart_rx_irq_count(void);
 uint32_t uart_rx_bytes(void);
 int uart_tx_midline(void);     /* D-03：TX 行组装中（调度器推迟抢占用） */
 
+/* M7：输出抽头（远程 MCP 通道抓响应行用）。fn 必须不重入、不打印。 */
+void uart_set_sink(void (*fn)(char));
+
 #endif /* TUDOU_UART_H */

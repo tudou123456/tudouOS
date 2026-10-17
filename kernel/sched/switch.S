@@ -73,6 +73,14 @@ pot_do_resume:
     movi    a3, pot_task_ps
     l32i    a3, a3, 0
     wsr     a3, 194               /* 常态 PS → SR194（rfe 取数槽） */
+#if TUDOU_PLATFORM != 0
+    /* 真机：EPS1 编号与 QEMU 实证槽（SR194）可能不一致（本 binutils
+     * 配置无 eps1 名、176=configid0、194=eps2；真机 rfe 读标准 EPS1）。
+     * 双写盲覆盖：常态 PS 是内核常量，写两个候选槽都安全——
+     * 176 若为 configid0 则写被忽略；194 若为 eps2 则仅在 EXCM=1
+     * 区间内被改，level-2 入口会重填，无副作用。 */
+    wsr     a3, 176
+#endif
     l32i    a3, a1, 0
     wsr.epc1 a3                   /* 续体 PC = 帧 a0 槽 */
     l32i    a0, a1, 0
@@ -109,8 +117,18 @@ pot_do_resume:
     .globl pot_do_resume_irq
 pot_do_resume_irq:
     l32i    a1, a2, TCB_SP_OFF
+#if TUDOU_PLATFORM != 0
+    /* 真机：帧 +80 存的是 SR176（本 binutils 中 = configid0，实测
+     * 0xc2f0fffe 垃圾值），真正的异常 PS 在 +84（SAVE 时 rsr 194）。
+     * QEMU 的 rsr 194 就是该槽，走下面的 80。 */
+    l32i    a3, a1, 84
+#else
     l32i    a3, a1, 80
+#endif
     wsr     a3, 194               /* 异常 PS → SR194（rfe 的取数槽） */
+#if TUDOU_PLATFORM != 0
+    wsr     a3, 176               /* 真机双写（同 pot_do_resume 注） */
+#endif
     l32i    a3, a1, 76
     wsr.epc1 a3                   /* 恢复续体 PC */
     l32i    a0, a1, 0

@@ -542,6 +542,13 @@ static void handle_line(const char *line)
     }
 }
 
+/* 同步处理一行 JSON-RPC（M7 远程通道直调：请求方当场拿到响应行）。
+ * 与代理任务共用同一 handle_line，语义完全一致。 */
+void mcp_handle_line(const char *line)
+{
+    handle_line(line);
+}
+
 static void mcp_agent(void *arg)
 {
     (void)arg;

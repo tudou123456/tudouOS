@@ -23,5 +23,7 @@ uint32_t time_ticks_raw(void);
 uint32_t time_tick_count(void);
 uint32_t time_tick_jitter_min_us(void);
 uint32_t time_tick_jitter_max_us(void);
+/* M8/D-08：看门狗自愈路径（int6 丢失补偿）补记的 tick 累计次数 */
+uint32_t time_tick_watchdog_count(void);
 
 #endif /* TUDOU_TIME_H */

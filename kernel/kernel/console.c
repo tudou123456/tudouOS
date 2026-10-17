@@ -11,10 +11,12 @@
 #include "mcp.h"
 #include "memdemo.h"
 #include "msgdemo.h"
+#include "net.h"
 #include "obs.h"
 #include "pal.h"
 #include "potato.h"
 #include "potfs.h"
+#include "smp.h"
 #include "task.h"
 #include "tick.h"
 #include "time.h"
@@ -145,9 +147,117 @@ static void cmd_help(void)
               "msgstat, memstat, memtest <mode> [n], pal, drivers, "
               "fs <sub>, mcp on|off, flood <n>, crash, looptest [n]\r\n"
               "  fs: ls|write <n> <t>|cat <n>|rm <n>|mkfs|df\r\n"
-              "  trace: [n]|jsonl [n]|stream on|off|pump|meta|health\r\n"
+              "  trace: [n]|jsonl [n]|imp [n]|stream on|off|pump|meta|health\r\n"
               "  health, obs [panic], inject <leak|hang|spin|off> [arg]\r\n"
+              "  net [arp|link down|up|ip <a.b.c.d> [gw]], ping <a.b.c.d>\r\n"
+              "  netmcp [dump|test|port <p>|peer <a.b.c.d> <port>]\r\n"
+              "  smp [stat|start|ipi <n>|spawn <cpu|any> <n>|work|preempt on|off|"
+              "selftest]  (M9 双核)\r\n"
               "  MCP: lines starting with '{' are JSON-RPC\r\n");
+}
+
+/* M9：SMP 控制台命令。
+ *   smp               → 状态（两核 online/IPI/迁移/自旋计数）
+ *   smp start         → 启动 CPU1（写 SYSTEM_CORE_1_CONTROL_1 走 ROM 桩）
+ *   smp ipi <n>       → CPU0 向 CPU1 发 n 次核间中断（验证 IPI 通路）
+ *   smp spawn <cpu|any> <n> → 创建 n 个双核压测任务（any=任意核）
+ *   smp work          → 打印压测任务执行计数
+ *   smp preempt on|off → CPU1 tick 抢占开关（默认 off）
+ *   smp selftest      → 常量/身份自检（rc=0 为通过） */
+static const char *smp_skip_space(const char *p)
+{
+    while (*p == ' ') {
+        p++;
+    }
+    return p;
+}
+
+static unsigned smp_parse_unsigned(const char **pp, unsigned max)
+{
+    const char *p = *pp;
+    unsigned n = 0;
+    unsigned digits = 0;
+    while (*p >= '0' && *p <= '9') {
+        n = n * 10u + (unsigned)(*p - '0');
+        p++;
+        digits++;
+        if (digits > 6u) {
+            break;
+        }
+    }
+    if (n > max) {
+        n = max;
+    }
+    *pp = p;
+    return n;
+}
+
+static void cmd_smp(const char *arg)
+{
+    if (*arg == '\0' || strcmp(arg, "stat") == 0) {
+        pot_smp_dump();
+        return;
+    }
+    if (strcmp(arg, "selftest") == 0) {
+        potato_printf("[POTATO][SMP] selftest rc=%d\r\n", pot_smp_selftest());
+        return;
+    }
+    if (strcmp(arg, "start") == 0) {
+        int rc = pot_smp_start();
+        potato_printf("[POTATO][SMP] start rc=%d online=%u\r\n", rc,
+                      (unsigned)pot_smp_online());
+        return;
+    }
+    if (strcmp(arg, "work") == 0) {
+        pot_smp_work_dump();
+        return;
+    }
+    if (strcmp(arg, "preempt") == 0) {
+        potato_printf("[POTATO][SMP] cpu1_preempt=%d (usage: smp preempt on|off)\r\n",
+                      pot_smp_cpu1_preempt());
+        return;
+    }
+    if (strcmp(arg, "preempt on") == 0 || strcmp(arg, "preempt 1") == 0) {
+        pot_smp_set_cpu1_preempt(1);
+        potato_printf("[POTATO][SMP] cpu1_preempt=1\r\n");
+        return;
+    }
+    if (strcmp(arg, "preempt off") == 0 || strcmp(arg, "preempt 0") == 0) {
+        pot_smp_set_cpu1_preempt(0);
+        potato_printf("[POTATO][SMP] cpu1_preempt=0\r\n");
+        return;
+    }
+    if (strncmp(arg, "spawn ", 6) == 0) {
+        const char *p = smp_skip_space(arg + 6);
+        int aff = -1;
+        if (p[0] == 'a' && p[1] == 'n' && p[2] == 'y') {
+            aff = -1;
+            p = smp_skip_space(p + 3);
+        } else if (p[0] == '0' || (p[0] == '1' && (p[1] == ' ' || p[1] == '\0'))) {
+            aff = (p[0] == '1') ? 1 : 0;
+            p = smp_skip_space(p + 1);
+        } else {
+            potato_printf("[POTATO][SMP] spawn: bad cpu (0|1|any)\r\n");
+            return;
+        }
+        unsigned n = smp_parse_unsigned(&p, 4u);
+        int made = pot_smp_spawn(aff, n);
+        potato_printf("[POTATO][SMP] spawn aff=%d n=%u made=%d\r\n",
+                      aff, n, made);
+        return;
+    }
+    if (strncmp(arg, "ipi ", 4) == 0) {
+        const char *p = arg + 4;
+        unsigned n = smp_parse_unsigned(&p, 10000u);
+        for (unsigned i = 0; i < n; i++) {
+            pot_smp_ipi_send(1, POT_IPI_RESCHED);
+        }
+        potato_printf("[POTATO][SMP] ipi sent=%u to cpu1\r\n", n);
+        return;
+    }
+    potato_printf("[POTATO][SMP] unknown smp sub: %s "
+                  "(stat|start|ipi <n>|spawn <cpu|any> <n>|work|"
+                  "preempt on|off|selftest)\r\n", arg);
 }
 
 static void cmd_info(void)
@@ -249,7 +359,7 @@ static const char *split_word(const char *arg, char *out, int cap)
 
 static void cmd_trace(const char *arg)
 {
-    /* 子命令：trace [n] | jsonl [n] | stream on|off|pump | meta | health */
+    /* 子命令：trace [n] | jsonl [n] | imp [n] | stream on|off|pump | meta | health */
     char sub[10];
     const char *rest = split_word(arg, sub, (int)sizeof(sub));
 
@@ -277,6 +387,12 @@ static void cmd_trace(const char *arg)
         } else {
             uart_puts("[POTATO][OBS] usage: trace stream on|off|pump\r\n");
         }
+        return;
+    }
+    if (strcmp(sub, "imp") == 0) {
+        unsigned n = trace_export_important(parse_dec(rest, 0u));
+        potato_printf("[POTATO][TRJ] exported_imp=%u total_imp=%u\r\n",
+                      n, trace_important_total());
         return;
     }
     if (strcmp(sub, "meta") == 0) {
@@ -313,9 +429,10 @@ static void cmd_obs(const char *arg)
         return;
     }
     potato_printf("[POTATO][OBS] stream=%d pumped=%u lost=%u calls=%u "
-                  "health_n=%u\r\n",
+                  "health_n=%u imp_pumped=%u imp_lost=%u\r\n",
                   pot_obs_stream_on(), pot_obs_pumped(), pot_obs_lost(),
-                  pot_obs_pump_calls(), pot_obs_health_count());
+                  pot_obs_pump_calls(), pot_obs_health_count(),
+                  pot_obs_imp_pumped(), pot_obs_imp_lost());
 }
 
 static void cmd_flood(const char *arg)
@@ -721,6 +838,152 @@ static void cmd_mmutest(const char *arg)
     uart_puts("[POTATO][E3] mmutest dump|load|jump\r\n");
 }
 
+/* ---------- M7：以太网 / 远程 MCP 通道 ---------- */
+
+/* "a.b.c.d" → 主机字节序；1=成功 */
+static int parse_ip4(const char *s, uint32_t *out)
+{
+    uint32_t v = 0;
+    int parts = 0;
+    while (parts < 4) {
+        if (*s < '0' || *s > '9') {
+            return 0;
+        }
+        uint32_t n = 0;
+        int digits = 0;
+        while (*s >= '0' && *s <= '9' && digits < 3) {
+            n = n * 10u + (uint32_t)(*s - '0');
+            s++;
+            digits++;
+        }
+        if (n > 255u) {
+            return 0;
+        }
+        v = (v << 8) | n;
+        parts++;
+        if (parts == 4) {
+            break;
+        }
+        if (*s != '.') {
+            return 0;
+        }
+        s++;
+    }
+    if (*s != '\0' && *s != ' ') {
+        return 0;
+    }
+    *out = v;
+    return 1;
+}
+
+static void cmd_net(const char *arg)
+{
+    /* net | net arp | net link down|up | net ip <a.b.c.d> [gw] */
+    char sub[10];
+    const char *rest = split_word(arg, sub, (int)sizeof(sub));
+
+    if (sub[0] == '\0') {
+        net_stats_dump();
+        return;
+    }
+    if (strcmp(sub, "arp") == 0) {
+        if (net_arp_count() == 0) {
+            uart_puts("[POTATO][NET] arp empty\r\n");
+        }
+        net_arp_dump();
+        return;
+    }
+    if (strcmp(sub, "link") == 0) {
+        char w[10];
+        split_word(rest, w, (int)sizeof(w));
+        if (strcmp(w, "down") == 0) {
+            net_sim_link(0);
+        } else if (strcmp(w, "up") == 0) {
+            net_sim_link(1);
+        } else {
+            uart_puts("[POTATO][NET] usage: net link down|up\r\n");
+        }
+        return;
+    }
+    if (strcmp(sub, "ip") == 0) {
+        char w[18];
+        const char *r2 = split_word(rest, w, (int)sizeof(w));
+        uint32_t ip = 0;
+        if (!parse_ip4(w, &ip)) {
+            uart_puts("[POTATO][NET] usage: net ip <a.b.c.d> [gw]\r\n");
+            return;
+        }
+        char g[18];
+        split_word(r2, g, (int)sizeof(g));
+        uint32_t gw = 0;
+        if (g[0] != '\0' && !parse_ip4(g, &gw)) {
+            gw = 0;
+        }
+        net_set_ip(ip, gw);
+        char b1[16];
+        char b2[16];
+        net_ip_str(net_ip(), b1, sizeof(b1));
+        net_ip_str(net_gw(), b2, sizeof(b2));
+        potato_printf("[POTATO][NET] ip=%s gw=%s\r\n", b1, b2);
+        return;
+    }
+    uart_puts("[POTATO][NET] usage: net [arp|link down|up|ip <a.b.c.d> [gw]]\r\n");
+}
+
+static void cmd_ping(const char *arg)
+{
+    uint32_t ip = 0;
+    if (!parse_ip4(arg, &ip)) {
+        uart_puts("[POTATO][NET] usage: ping <a.b.c.d>\r\n");
+        return;
+    }
+    char b[16];
+    net_ip_str(ip, b, sizeof(b));
+    uint32_t rtt = 0;
+    int r = net_ping(ip, 1000u, &rtt);
+    potato_printf("[POTATO][NET] ping %s %s rtt=%ums\r\n", b, r == 0 ? "ok" : "fail",
+                  (unsigned)rtt);
+}
+
+static void cmd_netmcp(const char *arg)
+{
+    /* netmcp | netmcp dump | netmcp port <p> | netmcp peer <ip> <port> | test */
+    char sub[10];
+    const char *rest = split_word(arg, sub, (int)sizeof(sub));
+
+    if (sub[0] == '\0' || strcmp(sub, "dump") == 0) {
+        netmcp_dump();
+        return;
+    }
+    if (strcmp(sub, "test") == 0) {
+        int r = netmcp_selftest();
+        potato_printf("[POTATO][NETMCP] selftest %s\r\n", r == 0 ? "ok" : "FAIL");
+        return;
+    }
+    if (strcmp(sub, "port") == 0) {
+        char w[12];
+        split_word(rest, w, (int)sizeof(w));
+        netmcp_set_udp_port((uint16_t)parse_dec(w, 0));
+        potato_printf("[POTATO][NETMCP] local port=%d\r\n", netmcp_udp_port());
+        return;
+    }
+    if (strcmp(sub, "peer") == 0) {
+        char w[18];
+        const char *r2 = split_word(rest, w, (int)sizeof(w));
+        uint32_t ip = 0;
+        if (!parse_ip4(w, &ip)) {
+            uart_puts("[POTATO][NETMCP] usage: netmcp peer <a.b.c.d> <port>\r\n");
+            return;
+        }
+        char p[12];
+        split_word(r2, p, (int)sizeof(p));
+        netmcp_set_peer(ip, (uint16_t)parse_dec(p, 0));
+        return;
+    }
+    uart_puts("[POTATO][NETMCP] usage: netmcp [dump|test|port <p>|"
+              "peer <a.b.c.d> <port>]\r\n");
+}
+
 static void cmd_dispatch(char *line)
 {
     /* MCP 传输路由：'{' 开头的行投递消息基座（M6） */
@@ -762,7 +1025,12 @@ static void cmd_dispatch(char *line)
         return;
     }
     if (strcmp(line, "ping") == 0) {
-        uart_puts("pong\r\n");
+        /* 无参：M1 存活探针（回归锚点，勿改）；带参：M7 ICMP echo */
+        if (arg[0] == '\0') {
+            uart_puts("pong\r\n");
+        } else {
+            cmd_ping(arg);
+        }
         return;
     }
     if (strcmp(line, "echo") == 0) {
@@ -863,6 +1131,18 @@ static void cmd_dispatch(char *line)
     }
     if (strcmp(line, "inject") == 0) {
         cmd_inject(arg);
+        return;
+    }
+    if (strcmp(line, "net") == 0) {
+        cmd_net(arg);
+        return;
+    }
+    if (strcmp(line, "netmcp") == 0) {
+        cmd_netmcp(arg);
+        return;
+    }
+    if (strcmp(line, "smp") == 0) {
+        cmd_smp(arg);
         return;
     }
     potato_printf("[POTATO] unknown command: %s (try 'help')\r\n", line);

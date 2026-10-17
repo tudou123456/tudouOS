@@ -1,6 +1,8 @@
 #ifndef TUDOU_MCP_H
 #define TUDOU_MCP_H
 
+#include <stdint.h>
+
 /*
  * MCP 协议适配器（M6，支柱1 收官；D-20 语义对齐 2025-06-18 规范核心）
  * ——见 docs/mcp-bus-design.md。
@@ -25,5 +27,9 @@ int  mcp_running(void);
 
 /* 传输侧投递一行 JSON（控制台调用）；0=已入队 1=通道满 2=超长拒绝 */
 int mcp_submit_line(const char *line, uint32_t len);
+
+/* 同步处理一行 JSON-RPC（M7 远程通道用：调用期间响应行经 uart 输出抽头
+ * 捕获并回送对端）。注意：不可从 ISR 调用。 */
+void mcp_handle_line(const char *line);
 
 #endif /* TUDOU_MCP_H */

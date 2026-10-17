@@ -11,19 +11,42 @@
  *   int 0-18,27..: level1（无专用向量，走通用异常，M2 不用）
  *   int 19/20/21:  level2（向量 VECBASE+0x180）
  *   int 22/23:     level3（向量 VECBASE+0x1C0）
- * 本内核占用：UART0→int19(level2)，SYSTIMER_TARGET0→int22(level3)。
+ * 本内核占用：UART0→int19(level2)，EMAC→int20(level2)，
+ * SYSTIMER_TARGET0→int22(level3)。
+ * 矩阵寄存器布局：源 N 的映射字在 0x600C2000 + 4*N（值 = CPU 中断号，
+ * 0 无效；CPU1 的映射区从 ESP32S3_INT_MATRIX_INPUTS*4 起）。
  */
 
 #define INTC_UART0_CPU_INT     19
+#define INTC_EMAC_CPU_INT      20
+#define INTC_IPI_CPU_INT       21  /* M9：核间中断（level2，与 19/20 共用向量） */
+#define INTC_UART0_SOURCE      27u  /* ETS_UART0_INTR_SOURCE */
+#define INTC_EMAC_SOURCE       0u   /* ETS_ETH_MAC_INTR_SOURCE = ETS_WIFI_MAC_INTR_SOURCE */
+/* M9 核间中断源：SYSTEM_CPU_INTR_FROM_CPU_0/1（0x600C0030/0x600C0034）
+ * → 中断矩阵源 ETS_FROM_CPU_INTR0=79 / INTR1=80（QEMU esp32s3_intc.h 枚举计数） */
+#define INTC_FROM_CPU0_SOURCE  79u  /* CPU0 写 FROM_CPU_0 → CPU1 接收 */
+#define INTC_FROM_CPU1_SOURCE  80u  /* CPU1 写 FROM_CPU_1 → CPU0 接收 */
+/* IPI 的"对核接收"映射目标：level-1 外部中断号 4，INTENABLE 永不置位
+ *（只抬矩阵线不响应）——避免矩阵默认映射 6（CCOMPARE0 tick）误触发 */
+#define INTC_IPI_MASK_INT      4
+/* 中断矩阵每 CPU 区大小：ESP32S3_INT_MATRIX_INPUTS(512) * 4 */
+#define INTC_MATRIX_CPU_STRIDE 0x800u
 
 /* 映射外设源到 CPU 中断号并置 INTENABLE（在开全局中断前调用） */
 void intc_init(void);
 
+/* 通用源路由（M7：EMAC 等新增外设用；source 为中断矩阵源号，CPU0 视角） */
+void intc_route_source(unsigned source, unsigned cpu_int);
+
+/* M9：按 CPU 路由（cpu=0/1；CPU1 的映射区在 0x600C2800 起） */
+void intc_route_source_cpu(unsigned cpu, unsigned source, unsigned cpu_int);
+
 /* 使能单个 CPU 中断号（如 tick_init 再开 int6） */
 void intc_enable_int(unsigned int_num);
 
-/* vectors.S 胶水在关中断现场保存后调用（汇编侧入口，勿直接调用） */
-void intc_irq_dispatch(unsigned level);
+/* vectors.S 胶水在关中断现场保存后调用（汇编侧入口，勿直接调用）。
+ * frame_base = 被打断上下文的 IRQ 帧基址（M9 IPI 重调度要用） */
+void intc_irq_dispatch(unsigned level, void *frame_base);
 
 /* 通用异常(EXCCAUSE=4)路径的 level-1 分发；1=已处理可恢复。
  * frame_base 为被打断上下文的帧基址（抢占切换用，切换时不返回） */

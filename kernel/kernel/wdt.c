@@ -23,11 +23,46 @@
 
 #define WDT_WKEY 0x50D83AA1u
 
+#define RTC_CNTL_SWD_CONF_OFF     0xB4u
+#define RTC_CNTL_SWD_WPROTECT_OFF 0xB8u
+#define SWD_WKEY              0x8F1D312Au
+#define SWD_CONF_DISABLE      (1u << 30)
+#define SWD_CONF_FEED         (1u << 29)
+#define SWD_CONF_RST_FLAG_CLR (1u << 28)
+#define SWD_CONF_AUTO_FEED_EN (1u << 31)
+
 static void timg_wdt_disable(uint32_t timg_base)
 {
     mmio_write(timg_base + TIMG_WDTWPROTECT_OFF, WDT_WKEY);
     mmio_write(timg_base + TIMG_WDTCONFIG0_OFF, 0u);
     mmio_write(timg_base + TIMG_WDTWPROTECT_OFF, 0u);
+}
+
+void wdt_swd_disable(void)
+{
+    uint32_t v = mmio_read(RTC_CNTL_BASE + RTC_CNTL_SWD_CONF_OFF);
+    mmio_write(RTC_CNTL_BASE + RTC_CNTL_SWD_WPROTECT_OFF, SWD_WKEY);
+    mmio_write(RTC_CNTL_BASE + RTC_CNTL_SWD_CONF_OFF,
+               v | SWD_CONF_DISABLE | SWD_CONF_RST_FLAG_CLR);
+    mmio_write(RTC_CNTL_BASE + RTC_CNTL_SWD_WPROTECT_OFF, 0u);
+}
+
+uint32_t wdt_swd_conf(void)
+{
+    return mmio_read(RTC_CNTL_BASE + RTC_CNTL_SWD_CONF_OFF);
+}
+
+/* 关不掉时的兜底：tick 里周期喂。已关闭/自动喂时是 1 次只读，几乎零开销 */
+void wdt_swd_feed(void)
+{
+    uint32_t v = mmio_read(RTC_CNTL_BASE + RTC_CNTL_SWD_CONF_OFF);
+    if ((v & SWD_CONF_DISABLE) != 0u || (v & SWD_CONF_AUTO_FEED_EN) != 0u) {
+        return;
+    }
+    mmio_write(RTC_CNTL_BASE + RTC_CNTL_SWD_WPROTECT_OFF, SWD_WKEY);
+    mmio_write(RTC_CNTL_BASE + RTC_CNTL_SWD_CONF_OFF,
+               v | SWD_CONF_FEED | SWD_CONF_RST_FLAG_CLR);
+    mmio_write(RTC_CNTL_BASE + RTC_CNTL_SWD_WPROTECT_OFF, 0u);
 }
 
 void wdt_early_disable(void)
@@ -38,4 +73,7 @@ void wdt_early_disable(void)
     mmio_write(RTC_CNTL_BASE + RTC_CNTL_WDTWPROTECT_OFF, WDT_WKEY);
     mmio_write(RTC_CNTL_BASE + RTC_CNTL_WDTCONFIG0_OFF, 0u);
     mmio_write(RTC_CNTL_BASE + RTC_CNTL_WDTWPROTECT_OFF, 0u);
+
+    wdt_swd_disable(); /* 真机 super watchdog：默认使能，必须显式关 */
 }
+

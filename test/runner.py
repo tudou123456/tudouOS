@@ -74,9 +74,10 @@ class _PipeDrain(threading.Thread):
 class VMInstance:
     """一台专属 QEMU 虚拟机：动态端口，日志齐全，用完即毁。"""
 
-    def __init__(self, qemu, flash, case_name):
+    def __init__(self, qemu, flash, case_name, extra_args=None):
         self.qemu = qemu
         self.flash = flash
+        self.extra_args = list(extra_args or [])
         self.qmp_port = free_port()
         self.serial_port = free_port()
         self.proc = None
@@ -92,7 +93,7 @@ class VMInstance:
         self.proc = subprocess.Popen(
             [self.qemu, "-machine", "esp32s3", "-drive", drive_arg,
              "-display", "none", "-monitor", "none", "-S",
-             "-serial", serial_tcp, "-qmp", qmp_tcp],
+             "-serial", serial_tcp, "-qmp", qmp_tcp, *self.extra_args],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False)
         self.drain = _PipeDrain(self.proc.stdout)
         self.drain.start()
@@ -130,6 +131,8 @@ class CaseContext:
 
 
 def discover_cases():
+    """收集用例；模块级可选 QEMU_ARGS 会挂到该模块每个用例函数上，
+    由 main() 传给 VMInstance（M7 以太网用例需要 -nic user,model=open_eth）。"""
     cases = []
     pattern = os.path.join(ROOT, "test", "cases", "test_*.py")
     for path in sorted(glob.glob(pattern)):
@@ -137,10 +140,12 @@ def discover_cases():
         spec = importlib.util.spec_from_file_location("cases." + stem, path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
+        extra = list(getattr(mod, "QEMU_ARGS", []))
         for attr in dir(mod):
             if attr.startswith("test_"):
                 fn = getattr(mod, attr)
                 if callable(fn):
+                    fn.qemu_args = extra
                     cases.append(fn)
     return cases
 
@@ -185,7 +190,7 @@ def main():
     for fn in cases:
         name = fn.__name__
         print(f"--- RUN  {name}")
-        vm = VMInstance(qemu, args.flash, name)
+        vm = VMInstance(qemu, args.flash, name, extra_args=getattr(fn, "qemu_args", None))
         t0 = time.monotonic()
         error = None
         tb = None

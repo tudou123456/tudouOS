@@ -76,7 +76,8 @@ pot_vectors:
 
 /* 通用异常现场保存：帧 88 字节，与 switch.S 任务帧布局一致（含 epc1/eps1，
  * M3 抢占切换会把它整体当作 IRQ 帧记账到被抢占任务）：
- *   0..56 a0,a2..a15   60..72 sar/lbeg/lend/lcount   76 epc1   80 eps1 */
+ *   0..56 a0,a2..a15   60..72 sar/lbeg/lend/lcount   76 epc1   80 eps1
+ *   （真机构建另用 84 槽存 SR194 候选值，见下方 SAVE 内 #if 注释） */
     .macro SAVE_CALL0_REGS
     addi    a1, a1, -88
     s32i    a0, a1, 0
@@ -104,10 +105,21 @@ pot_vectors:
     s32i    a2, a1, 72
     rsr.epc1    a2
     s32i    a2, a1, 76
+#if TUDOU_PLATFORM == 0
     rsr     a2, 194               /* 异常 PS 槽位（E-02 实证：rfe 从 SR194
                                      * 恢复 PS；binutils 名 eps2，193 非有效
                                      * SR，161 标准 EPS1 编号但不被 rfe 读） */
     s32i    a2, a1, 80
+#else
+    /* 真机：EPS1 真实编号未定（本 binutils 配置 176=configid0、194=eps2、
+     * 无 eps1 名）。两候选都入帧：80←SR176（标准 EPS1 首选），84←SR194。
+     * intc_l1_dispatch 的首 tick 探针打印二者实测值定案；preempt 默认关，
+     * 帧槽 80 的回写路径（pot_do_resume_irq）在此之前不会运行。 */
+    rsr     a2, 176
+    s32i    a2, a1, 80
+    rsr     a2, 194
+    s32i    a2, a1, 84
+#endif
     .endm
 
     .macro RESTORE_CALL0_REGS
@@ -145,6 +157,7 @@ pot_vectors:
 pot_irq_level\level:
     SAVE_CALL0_REGS
     movi    a2, \level
+    mov     a3, a1                  /* M9：帧基址（IPI 重调度要挂帧） */
     call0   intc_irq_dispatch
     RESTORE_CALL0_REGS
     rfi     \level
