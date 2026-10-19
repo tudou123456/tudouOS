@@ -1,6 +1,5 @@
 # tudouOS
 
-[![CI](https://github.com/tudou123456/tudouOS/actions/workflows/ci.yml/badge.svg)](https://github.com/tudou123456/tudouOS/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/tudou123456/tudouOS?include_prereleases&label=release)](https://github.com/tudou123456/tudouOS/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
