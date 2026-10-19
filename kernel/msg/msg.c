@@ -1,0 +1,348 @@
+#include <stdint.h>
+
+#include "intc.h"
+#include "lib_shim.h"
+#include "msg.h"
+#include "task.h"
+#include "tick.h"
+#include "trace.h"
+
+/*
+ * 消息基座实现（M3.5）。
+ *
+ * 等待语义 v2：切片睡眠轮询——send/recv 在等待期以 2ms 切片睡眠并重查
+ * 条件，只用 pot_task_sleep/pot_tick_poll/pot_sched_now 三个 M3 已被
+ * 14 用例验证的原语。v1 的"显式唤醒（waiters+pot_sched_wake）"在该
+ * QEMU 上行为不可解释（唤醒永不落地），整体废弃；真机阶段可恢复。
+ *
+ * 一切容量静态：通道环形缓冲 + 定宽数组的去重/回执窗口。
+ */
+
+#define POT_MSG_SLICE_MS 2u /* 等待轮询切片 */
+
+/* P0-3：通道环/窗口是多步复合结构，SMP 下必须跨核互斥（一个锁覆盖
+ * 所有通道即可——临界区都很短，避免每通道一把锁的结构体改动） */
+static pot_lock_t g_msg_lock;
+
+/* M8：通道注册表（健康快照遍历用；初始化即登记，去重） */
+#define POT_CH_REG_MAX 8
+static pot_channel_t *g_ch_reg[POT_CH_REG_MAX];
+static int g_ch_n;
+
+int pot_channel_count(void)
+{
+    return g_ch_n;
+}
+
+pot_channel_t *pot_channel_at(int i)
+{
+    return (i >= 0 && i < g_ch_n) ? g_ch_reg[i] : 0;
+}
+
+static void channel_register(pot_channel_t *ch)
+{
+    for (int i = 0; i < g_ch_n; i++) {
+        if (g_ch_reg[i] == ch) {
+            return;
+        }
+    }
+    if (g_ch_n < POT_CH_REG_MAX) {
+        g_ch_reg[g_ch_n++] = ch;
+    }
+}
+
+static inline int past(uint32_t deadline)
+{
+    return (int32_t)(pot_sched_now() - deadline) >= 0;
+}
+
+int pot_channel_init(pot_channel_t *ch, const char *name,
+                     pot_msg_t *ring, uint16_t cap, int drop_oldest)
+{
+    if (ch == 0 || ring == 0 || cap == 0 || (cap & (cap - 1)) != 0) {
+        return -1;
+    }
+    memset(ch, 0, sizeof(*ch));
+    ch->name = name;
+    ch->ring = ring;
+    ch->cap = cap;
+    ch->drop_oldest = (uint8_t)(drop_oldest != 0);
+    ch->next_seq = 1; /* 0 保留给"尚未入队"的发送方 seq 哨兵 */
+    channel_register(ch);
+    return 0;
+}
+
+/* ---------- 窗口操作（P1-1：按发送方分桶 + seq 配对） ----------
+ * 扫描循环的 volatile 索引为历史纪律（E-01 已证伪 "QEMU 不支持 loop"，
+ * 见 lib_shim.c 注释），保留无害。 */
+
+static uint32_t sender_bucket(const pot_task_t *s)
+{
+    uint32_t v = (uint32_t)s;
+    return ((v >> 3) ^ (v >> 9)) & (POT_MSG_BUCKETS - 1u);
+}
+
+static int dedup_find(const pot_channel_t *ch, pot_task_t *s, uint32_t id)
+{
+    uint32_t b = sender_bucket(s);
+    for (volatile int i = 0; i < POT_MSG_BUCKET_SLOTS; i++) {
+        if (ch->dedup[b][i].sender == s && ch->dedup[b][i].id == id) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int acked_find(const pot_channel_t *ch, pot_task_t *s, uint32_t seq)
+{
+    uint32_t b = sender_bucket(s);
+    for (volatile int i = 0; i < POT_MSG_BUCKET_SLOTS; i++) {
+        if (ch->acked[b][i].sender == s && ch->acked[b][i].seq == seq) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int acked_hit(const pot_channel_t *ch, pot_task_t *s, uint32_t seq)
+{
+    return acked_find(ch, s, seq) >= 0;
+}
+
+/* 去重：同 (sender,id) 的条目只有在对应消息尚未回执时才算重复。
+ * 已回执说明上一轮生命周期结束——发送方复用同一 id 是新消息。 */
+static int dedup_hit(const pot_channel_t *ch, pot_task_t *s, uint32_t id,
+                     uint32_t *seq_out)
+{
+    int i = dedup_find(ch, s, id);
+    if (i < 0) {
+        return 0;
+    }
+    uint32_t b = sender_bucket(s);
+    uint32_t seq = ch->dedup[b][i].seq;
+    if (acked_hit(ch, s, seq)) {
+        return 0; /* 旧批次已闭环：允许 id 复用 */
+    }
+    if (seq_out != 0) {
+        *seq_out = seq; /* 重发：等原入队 seq 的回执 */
+    }
+    return 1;
+}
+
+static void dedup_add(pot_channel_t *ch, pot_task_t *s, uint32_t id,
+                      uint32_t seq)
+{
+    uint32_t b = sender_bucket(s);
+    uint8_t idx = ch->dedup_idx[b];
+    ch->dedup[b][idx].sender = s;
+    ch->dedup[b][idx].id = id;
+    ch->dedup[b][idx].seq = seq;
+    ch->dedup_idx[b] = (uint8_t)((idx + 1u) & (POT_MSG_BUCKET_SLOTS - 1u));
+}
+
+/* QoS1 drop_oldest：被丢消息的去重条目必须同步移除，否则发送方重发会
+ * 命中"已入队"而永远等不到回执（D-16 收口）。 */
+static void dedup_remove(pot_channel_t *ch, pot_task_t *s, uint32_t id)
+{
+    int i = dedup_find(ch, s, id);
+    if (i < 0) {
+        return;
+    }
+    uint32_t b = sender_bucket(s);
+    ch->dedup[b][i].sender = 0;
+    ch->dedup[b][i].id = 0;
+    ch->dedup[b][i].seq = 0;
+}
+
+/* ---------- 入队/出队 ---------- */
+
+/* 返回：0=入队 1=重复（幂等跳过） 2=满（需阻塞等空间） 3=QoS0 丢新 */
+static int enq(pot_channel_t *ch, pot_msg_t *m)
+{
+    /* D-01：去重只对 QoS1/2 有意义（存在重发路径）；QoS0 无重发，
+     * 去重只能误杀合法新消息（历史上 id 未赋值时曾整通道瘫痪） */
+    if (m->qos != POT_MSG_QOS0) {
+        uint32_t old_seq = 0;
+        if (dedup_hit(ch, m->sender, m->id, &old_seq)) {
+            ch->c_drop_dedup++;
+            trace_push(TR_MSG_DROP, (uint32_t)ch, 3);
+            m->seq = old_seq; /* 重发：沿用原 seq 等回执 */
+            return 1; /* 重发且原消息已入队：幂等 */
+        }
+    }
+
+    if (ch->count >= ch->cap) {
+        if (m->qos == POT_MSG_QOS0) {
+            ch->c_drop_full++;
+            trace_push(TR_MSG_DROP, (uint32_t)ch, 1);
+            return 3; /* 丢新 */
+        }
+        if (m->qos == POT_MSG_QOS1 && ch->drop_oldest) {
+            ch->c_drop_full++;
+            trace_push(TR_MSG_DROP, (uint32_t)ch, 1);
+            pot_msg_t *old = &ch->ring[ch->head];
+            dedup_remove(ch, old->sender, old->id);
+            ch->head = (uint16_t)((ch->head + 1) & (ch->cap - 1));
+            ch->count--;
+        } else {
+            return 2; /* 阻塞等空间 */
+        }
+    }
+
+    uint16_t slot = (uint16_t)((ch->head + ch->count) & (ch->cap - 1));
+    uint32_t seq = ch->next_seq++;
+    ch->ring[slot] = *m;
+    ch->ring[slot].seq = seq;
+    m->seq = seq; /* 发送方按本次入队 seq 等回执 */
+    ch->count++;
+    if (ch->count > ch->high_water) {
+        ch->high_water = ch->count;
+    }
+    if (m->qos != POT_MSG_QOS0) {
+        dedup_add(ch, m->sender, m->id, seq); /* D-17：QoS0 不占窗口 */
+    }
+    ch->c_enq++;
+    trace_push(TR_MSG_ENQ, (uint32_t)ch, m->id);
+    return 0;
+}
+
+static int deq(pot_channel_t *ch, pot_msg_t *out)
+{
+    if (ch->count == 0) {
+        return -1;
+    }
+    *out = ch->ring[ch->head];
+    ch->head = (uint16_t)((ch->head + 1) & (ch->cap - 1));
+    ch->count--;
+    ch->c_deq++;
+    trace_push(TR_MSG_DEQ, (uint32_t)ch, out->id);
+    return 0;
+}
+
+/* ---------- 公共 API ---------- */
+
+int pot_msg_send(pot_channel_t *ch, pot_msg_t *m, uint32_t timeout_ms)
+{
+    uint32_t deadline = pot_sched_now() + timeout_ms;
+    m->sender = pot_task_self(); /* M9：按本核取当前任务（等价单核 pot_current） */
+    m->deadline = deadline;
+    m->seq = 0; /* 0 = 尚未入队（P1-1 回执按入队 seq 配对） */
+
+    uint32_t backoff = POT_MSG_RETRY_BASE_MS;
+    int attempts = 0;
+
+    for (;;) {
+        pot_tick_poll();
+        /* 重发前先看回执：ack 可能在上一次超时判断之后到达，直接入队会
+         * 造成"已回执还重复投递"（P1-1 收口）。 */
+        if (m->seq != 0u) {
+            uint32_t ps = pot_lock_acquire(&g_msg_lock);
+            int hit = acked_hit(ch, m->sender, m->seq);
+            pot_lock_release(&g_msg_lock, ps);
+            if (hit) {
+                return 0;
+            }
+        }
+        /* P0-3：通道环/窗口多步变更非重入，与对核并发时必须跨核锁；
+           等待段在临界区外睡眠 */
+        uint32_t ps = pot_lock_acquire(&g_msg_lock);
+        int r = enq(ch, m);
+        pot_lock_release(&g_msg_lock, ps);
+        if (r == 3) {
+            return 1; /* QoS0 满丢新 */
+        }
+        if (r == 2) {
+            if (past(deadline)) {
+                ch->c_drop_deadline++;
+                trace_push(TR_MSG_DROP, (uint32_t)ch, 2);
+                return -1;
+            }
+            pot_task_sleep(POT_MSG_SLICE_MS); /* 等空间 */
+            continue;
+        }
+        /* r==0 首次入队 / r==1 重发幂等 */
+        if (m->qos == POT_MSG_QOS0) {
+            return 0;
+        }
+
+        /* QoS1/2：等回执（切片轮询；按入队 seq 配对，P1-1） */
+        for (;;) {
+            uint32_t ps = pot_lock_acquire(&g_msg_lock);
+            int hit = acked_hit(ch, m->sender, m->seq);
+            pot_lock_release(&g_msg_lock, ps);
+            if (hit) {
+                break;
+            }
+            pot_tick_poll();
+            if (past(deadline)) {
+                attempts++;
+                if (attempts > POT_MSG_MAX_RETRY) {
+                    ch->c_drop_deadline++;
+                    trace_push(TR_MSG_DROP, (uint32_t)ch, 2);
+                    return -1; /* 重发预算耗尽，上报失败 */
+                }
+                ch->c_retry++;
+                trace_push(TR_MSG_RETRY, (uint32_t)ch, m->id);
+                if (m->qos != POT_MSG_QOS2) {
+                    pot_task_sleep(backoff); /* QoS1 指数退避 */
+                    deadline = pot_sched_now() + backoff;
+                    backoff *= 2;
+                } else {
+                    deadline = pot_sched_now() + timeout_ms; /* QoS2 不退避 */
+                }
+                m->deadline = deadline;
+                break; /* 回到 enq（去重窗口保证幂等） */
+            }
+            pot_task_sleep(POT_MSG_SLICE_MS);
+        }
+        {
+            uint32_t ps = pot_lock_acquire(&g_msg_lock);
+            int hit = acked_hit(ch, m->sender, m->seq);
+            pot_lock_release(&g_msg_lock, ps);
+            if (hit) {
+                return 0; /* 已回执 */
+            }
+        }
+        /* 超时重发路径：回到循环头 */
+    }
+}
+
+int pot_msg_recv(pot_channel_t *ch, pot_msg_t *out, uint32_t timeout_ms)
+{
+    uint32_t deadline = pot_sched_now() + timeout_ms;
+
+    for (;;) {
+        pot_tick_poll();
+        uint32_t ps = pot_lock_acquire(&g_msg_lock); /* P0-3：环指针多步变更 */
+        int got = deq(ch, out);
+        pot_lock_release(&g_msg_lock, ps);
+        if (got == 0) {
+            return 0;
+        }
+        if (past(deadline)) {
+            return -1;
+        }
+        pot_task_sleep(POT_MSG_SLICE_MS);
+    }
+}
+
+void pot_msg_ack(pot_channel_t *ch, const pot_msg_t *m)
+{
+    /* D-17/P1-1：QoS0 无回执语义，不得挤占 QoS1/2 的回执窗口 */
+    if (m->qos == POT_MSG_QOS0) {
+        return;
+    }
+    uint32_t ps = pot_lock_acquire(&g_msg_lock); /* P0-3：回执窗口多步变更 */
+    if (acked_hit(ch, m->sender, m->seq)) {
+        pot_lock_release(&g_msg_lock, ps);
+        return;
+    }
+    uint32_t b = sender_bucket(m->sender);
+    uint8_t idx = ch->acked_idx[b];
+    ch->acked[b][idx].sender = m->sender;
+    ch->acked[b][idx].seq = m->seq;
+    ch->acked_idx[b] = (uint8_t)((idx + 1u) & (POT_MSG_BUCKET_SLOTS - 1u));
+    ch->c_ack++;
+    pot_lock_release(&g_msg_lock, ps);
+    trace_push(TR_MSG_ACK, (uint32_t)ch, m->id);
+}

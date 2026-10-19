@@ -1,0 +1,15 @@
+build/
+third_party/
+test/logs/
+__pycache__/
+*.pyc
+*.o
+*.elf
+*.bin
+!docs/**/*.bin
+.mimosa/
+.zcode/
+.zcodeignore
+-
+*.log
+*.pid

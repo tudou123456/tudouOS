@@ -1,0 +1,122 @@
+#ifndef TUDOU_MSG_H
+#define TUDOU_MSG_H
+
+#include <stdint.h>
+
+#include "task.h"
+
+/*
+ * 土豆内核消息基座（M3.5，支柱1 地基；设计稿 docs/mcp-bus-design.md）
+ *
+ * 实时语义进内核、协议解析不进内核：消息是定长二进制结构，通道是有界
+ * 环，一切容量静态、永不动态扩容（洪泛不 OOM）。
+ *
+ * QoS（队列满/超时行为）：
+ *   0 尽力而为   满则丢新并计数；超时静默
+ *   1 需回执     满按通道策略（丢最旧可配/阻塞）；未回执超时→重发
+ *                （指数退避，上限 POT_MSG_MAX_RETRY 次）后上报失败
+ *   2 关键       满则阻塞发送方（有超时）不丢弃；重发不退避直至达成/失败
+ *
+ * 去重：仅 QoS1/2（存在重发路径）按 (发送方, id) 滑动窗口拦截重复
+ * 投递；QoS0 无重发语义，不做去重（否则误杀合法新消息）。
+ * 唤醒：等待采用 2ms 切片睡眠轮询 + 醒来重查条件（v2 语义；
+ * v1 显式唤醒在该 QEMU 行为不可解释已废弃，真机阶段可恢复）。
+ */
+
+#define POT_MSG_INLINE 256u /* MCP JSON-RPC 单行内联负载（D-07：容纳 initialize 握手） */
+#define POT_MSG_QOS0 0
+#define POT_MSG_QOS1 1
+#define POT_MSG_QOS2 2
+
+#define POT_MSG_MAX_RETRY 2
+#define POT_MSG_RETRY_BASE_MS 50u
+
+/* 消息（定长：头 28B + 内联负载 POT_MSG_INLINE；MCP 环 8 条与 msgdemo
+ * 环 32 条的 RAM 预算按此核算——改 POT_MSG_INLINE 需同步估 bss 增量） */
+typedef struct {
+    uint32_t id;         /* 发送方单调递增，重发保号（去重键之一） */
+    uint32_t seq;        /* 通道内时序号，入队时分配（丢失/乱序检测） */
+    uint16_t type;       /* 应用自定义消息类型 */
+    uint16_t qos;        /* POT_MSG_QOS0/1/2 */
+    uint32_t deadline;   /* 绝对 tick（send 按 timeout 设置，含重发预算） */
+    pot_task_t *sender;  /* 发送方（去重/回执寻址） */
+    uint32_t trace_tag;  /* 链路追踪标签，透传进追踪环 */
+    uint16_t len;        /* 负载长度 ≤ POT_MSG_INLINE */
+    uint8_t data[POT_MSG_INLINE];
+} pot_msg_t;
+
+/* 等待者槽位（发送/接收混排，醒来各自重查） */
+#define POT_CH_WAITERS 4
+
+/* 去重/回执窗口：按发送方分桶（P1-1）。
+ * 8 槽共享窗口在多个发送方下会互相挤出条目——重复消息被二次投递；
+ * 回执按 id 配对又会在发送方复用 id 时唤醒错误批次。改为：
+ *   - 4 个发送方桶 × 4 槽（最近 4 条/发送方）
+ *   - 去重条目记录入队 seq；回执按 seq 配对，不按 id
+ *   - 只对 QoS1/2 记账（QoS0 无重发/回执语义，不得挤占窗口）
+ *   - 条目对应消息已回执时，同 id 的新消息按新消息处理（允许安全复用 id）
+ *   - QoS1 drop_oldest 丢最旧时同步移除其去重条目，重发可重新入队 */
+#define POT_MSG_BUCKETS 4
+#define POT_MSG_BUCKET_SLOTS 4
+
+/* 通道（调用方静态提供环形缓冲） */
+typedef struct {
+    const char *name;
+    pot_msg_t *ring;
+    uint16_t cap;        /* 2 的幂 */
+    uint16_t head;       /* 下一个出队槽 */
+    uint16_t count;
+    uint8_t drop_oldest; /* QoS1 满时丢最旧（0=阻塞） */
+    uint32_t next_seq;
+
+    /* 去重窗口（最近入队的 (sender,id,seq)） */
+    struct {
+        pot_task_t *sender;
+        uint32_t id;
+        uint32_t seq;
+    } dedup[POT_MSG_BUCKETS][POT_MSG_BUCKET_SLOTS];
+    uint8_t dedup_idx[POT_MSG_BUCKETS];
+
+    /* 回执窗口（最近回执的 (sender,seq)） */
+    struct {
+        pot_task_t *sender;
+        uint32_t seq;
+    } acked[POT_MSG_BUCKETS][POT_MSG_BUCKET_SLOTS];
+    uint8_t acked_idx[POT_MSG_BUCKETS];
+
+    pot_task_t *waiters[POT_CH_WAITERS];
+    int n_waiters;
+
+    /* 健康快照计数 */
+    uint32_t c_enq, c_deq, c_drop_full, c_drop_deadline, c_drop_dedup;
+    uint32_t c_retry, c_ack;
+    uint16_t high_water;
+} pot_channel_t;
+
+/* 初始化通道（ring 容量须为 2 的幂） */
+int pot_channel_init(pot_channel_t *ch, const char *name,
+                     pot_msg_t *ring, uint16_t cap, int drop_oldest);
+
+/*
+ * 发送（QoS0：0=入队 1=满丢弃；QoS1/2：阻塞等回执，0=已回执 -1=失败）
+ * timeout_ms 为整次操作（含重发）预算；QoS2 满时阻塞同受此约束。
+ */
+int pot_msg_send(pot_channel_t *ch, pot_msg_t *m, uint32_t timeout_ms);
+
+/* 接收：0=取到消息；-1=空且超时。QoS≥1 的消息由接收方调 pot_msg_ack */
+int pot_msg_recv(pot_channel_t *ch, pot_msg_t *out, uint32_t timeout_ms);
+
+/* 回执（记录进通道回执窗口并唤醒发送方） */
+void pot_msg_ack(pot_channel_t *ch, const pot_msg_t *m);
+
+/* M8：已初始化通道注册表（健康快照/统计遍历；上限 POT_CH_REG_MAX=8） */
+int pot_channel_count(void);
+pot_channel_t *pot_channel_at(int i);
+
+/* 当前 tick（deadline 计算用） */
+static inline uint32_t pot_msg_now(void)
+{
+    return pot_sched_now();
+}
+
+#endif /* TUDOU_MSG_H */

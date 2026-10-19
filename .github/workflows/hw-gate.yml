@@ -1,0 +1,54 @@
+name: Hardware gate
+
+# 需要一台带 ESP32-S3 开发板的自托管 Windows runner（labels:
+# self-hosted, windows, tudou-board），并已：
+#   - python tools/fetch_deps.py
+#   - 按当前源码构建并烧录 build/potato_boot_hw.bin
+# 该工作流不会在 PR 上自动运行，避免把带板机暴露给外部代码。
+
+on:
+  workflow_dispatch:
+    inputs:
+      port:
+        description: 串口（如 COM3）
+        required: true
+        default: COM3
+        type: string
+      rounds:
+        description: 真机前先跑的 QEMU 轮数
+        required: true
+        default: "1"
+        type: choice
+        options:
+          - "1"
+          - "2"
+
+concurrency:
+  group: hw-gate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  hw:
+    name: Hardware regression
+    runs-on: [self-hosted, windows, tudou-board]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Release gate (QEMU + hardware)
+        run: >
+          python tools/release_gate.py
+          --rounds ${{ inputs.rounds }}
+          --skip-build
+          --hw-port ${{ inputs.port }}
+      - name: Upload gate logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hw-gate-logs
+          path: |
+            build/_gate_*.log
+            test/logs/hw/*.log
+          retention-days: 7
