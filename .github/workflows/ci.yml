@@ -83,7 +83,7 @@ jobs:
         run: python tools/release_gate.py --rounds 2 --skip-build
       - name: Upload gate logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qemu-gate-logs
           path: |
