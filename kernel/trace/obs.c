@@ -172,6 +172,7 @@ uint32_t pot_obs_health_count(void)
 
 void pot_obs_health(void)
 {
+    uart_line_begin(); /* K2：健康 JSONL 行从行首开始（不接提示符） */
     pot_heap_stat_t hs;
     pot_heap_getstat(&hs);
     uint32_t sd[4] = {0, 0, 0, 0};

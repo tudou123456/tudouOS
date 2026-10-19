@@ -54,6 +54,10 @@ static volatile uint32_t g_ticks;
 static volatile uint32_t g_last_elapsed;
 static volatile uint32_t g_jit_min = 0xFFFFFFFFu;
 static volatile uint32_t g_jit_max;
+/* K1：首个触发间隔跨「tick_irq_arm 之前/之后的启动窗口」（真机实测
+ * 一次性 ~79ms），不是稳态中断延迟；统计首个样本时跳过，避免把启动
+ * 瞬态记进 jit_max。首样本可能来自 poll 或中断路径，二者共用该标记。 */
+static volatile int g_jit_seeded;
 static uint32_t g_next_cc;
 static uint32_t g_last_fire_cc;
 static volatile int g_irq_armed; /* D-04：中断驱动启用后停用轮询路径
@@ -176,6 +180,12 @@ void tick_init(void)
 
 void tick_irq_arm(void)
 {
+    /* K1：从使能时刻重新对齐比较基准——首个中断要等启动打印窗口结束
+       才到（真机实测 ~79ms 一次性瞬态），否则首个 delta 会从 tick_init
+       起算。抖动统计侧另有首样本跳过兜底。 */
+    g_last_fire_cc = ccount();
+    g_next_cc = g_last_fire_cc + TICK_PERIOD_CC;
+    g_jit_seeded = 0;
     set_ccompare0(g_next_cc);
     g_irq_armed = 1;
     intc_enable_int(CCOMPARE0_INT); /* int6，level-1，经 genex EXCCAUSE=4 */
@@ -226,10 +236,13 @@ void pot_tick_poll(void)
             g_next_cc = now + TICK_PERIOD_CC;
         }
 
-        /* 触发间隔统计（真实观测） */
+        /* 触发间隔统计（真实观测）。K1：首个样本跨启动窗口（一次性
+           瞬态 ~79ms），跳过统计；TICK_GAP 仍照实记录。 */
         uint32_t delta_us = (now - g_last_fire_cc) / CC_PER_US;
         g_last_fire_cc = now;
-        if (g_ticks > 2u) {
+        if (g_jit_seeded == 0) {
+            g_jit_seeded = 1;
+        } else if (g_ticks > 2u) {
             if (delta_us < g_jit_min) {
                 g_jit_min = delta_us;
             }
@@ -303,9 +316,12 @@ void tick_irq_handler(void)
     wdt_swd_feed();
 #endif
 
+    /* K1：首个样本跨启动窗口（一次性瞬态 ~79ms），跳过统计；TICK_GAP 照实记录 */
     uint32_t delta_us = (now - g_last_fire_cc) / CC_PER_US;
     g_last_fire_cc = now;
-    if (g_ticks > 2u) {
+    if (g_jit_seeded == 0) {
+        g_jit_seeded = 1;
+    } else if (g_ticks > 2u) {
         if (delta_us < g_jit_min) {
             g_jit_min = delta_us;
         }

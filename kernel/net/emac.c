@@ -10,10 +10,13 @@
 /*
  * EMAC 硬件后端（M7）——OpenCores MAC + DP83848C PHY 子集
  * ------------------------------------------------------------------
- * 目标：QEMU esp32s3 机器在真机 EMAC 基址（0x600CD000）上挂的
- * open_eth 设备（build/_qemu_src/hw/net/opencores_eth.c）。真机 S3 是
- * DesignWare GMAC，寄存器语义不同：本文件把 MAC 硬件收敛在 emac_* 接口
- * 后面，DW GMAC 后端为带板待办（docs/ethernet.md §真机后端）。
+ * 目标：QEMU esp32s3 机器在「真机 EMAC 基址」0x600CD000 上挂的
+ * open_eth 设备（build/_qemu_src/hw/net/opencores_eth.c）—— 该外设是
+ * QEMU 机器模型自建的测试设备，不是 ESP32-S3 硅片功能。S3 没有内部
+ * EMAC（IDF v5.3.1 的 ETH_USE_OPENETH 仅 QEMU；esp_hal_emac 无
+ * esp32s3 子目录；Espressif issue #17606 官方确认不支持 (R)MII），
+ * 真机以太网只能经 SPI 扩展芯片（W5500/DM9051 等，待硬件到货）。
+ * 真机远程控制面走串口 MCP 通道（netmcp serial transport）。
  *
  * 寄存器布局（偏移自基址，模型 enum 顺序，0x54B 窗）：
  *   MODER 0x00  INT_SOURCE 0x04  INT_MASK 0x08  PACKETLEN 0x18
@@ -377,13 +380,14 @@ void emac_get_stats(net_stats_t *out)
 int emac_init(void)
 {
 #if TUDOU_PLATFORM != 0
-    /* 真机（hw）构建：S3 的以太网是 DesignWare GMAC，寄存器语义与 QEMU 的
-     * open_eth 模型完全不同；且 EMAC 时钟若未在 SYSTEM 里打开，盲读
-     * 0x600CD000 会让总线挂死（带板实证：启动卡在 pot_drivers_init 的 net
-     * 驱动）。真机 DW GMAC 后端是 M7 待办（docs/ethernet.md §真机后端），
-     * 当前按“设备缺席”处理：打印一行明确说明并让驱动框架记为 skipped。 */
+    /* 真机（hw）构建：ESP32-S3 硅片没有内部 EMAC（见文件头事实说明）。
+     * 0x600CD000 是 QEMU open_eth 测试外设的地址，真机无此硬件；盲读还会
+     * 因 EMAC 时钟未开而挂死总线（带板实证：启动卡在 pot_drivers_init 的
+     * net 驱动）。故判为设备缺席、驱动框架记 skipped；真机远程控制面由
+     * net_start 启用串口 MCP 通道（transport=serial-json）。 */
     g_present = 0;
-    potato_printf("[POTATO][NET] EMAC: 真机 DW GMAC 后端未实现，跳过\r\n");
+    potato_printf("[POTATO][NET] EMAC: ESP32-S3 has no internal MAC, skip "
+                  "(remote MCP over serial)\r\n");
     trace_push(TR_NET_LINK, 0, 0);
     return 1;
 #else
@@ -391,8 +395,7 @@ int emac_init(void)
      * 模型语义（hw/net/opencores_eth.c:603-619）：写 RST 会先 open_eth_reset()
      * 但紧接着把 MODER 覆盖为写入值 → 读回应为 0x800；TX_BD_NUM 复位为 0x40。
      * 设备缺席（未传 -nic，区域未映射）时数据读返回毒值 0xdeadbeef，两个判据
-     * 都不成立 → 视为 skipped。真机 DW GMAC 语义不同，同样在此判为缺席，
-     * 由带板后端（docs/ethernet.md）接管。 */
+     * 都不成立 → 视为 skipped（QEMU 无 -nic 的测试场景）。 */
     mmio_write(R_MODER, MODER_RST);
     uint32_t moder = mmio_read(R_MODER);
     uint32_t txbd = mmio_read(R_TX_BD_NUM);

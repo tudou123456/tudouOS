@@ -25,6 +25,16 @@ python -m test.runner
   以及 `test_m7*.py`（以太网 6 例）、`test_obs.py`（M8 可观测 6 例）、
   `test_m9*.py`（SMP 6 例）、`test_build_hw.py`（hw 构建门禁 1 例）。
 
+> 注意「同源」的边界：M7 的 `model=open_eth` 是 QEMU `esp32s3` 机器模型自建的
+> **测试外设**（MMIO 映射 `0x600CD000`），ESP32-S3 硅片没有内部以太网 MAC。
+> 以太网用例只证明协议栈/模型行为，不代表真机有以太网；真机网络走串口 MCP
+> 传输（见 [ethernet.md](ethernet.md) §8、[serial-mcp.md](serial-mcp.md)）。
+
+> 真机用例不在 `test/cases/`：串口回归台用 `test/hw_runner.py` 发现
+> `test/hw_cases/test_hw_*.py`（72 条，M1–M9），与 QEMU runner 互不干扰。
+> 用法：`py -3.14 -m test.hw_runner --port COM3 --keep-going`；报告见
+> [test/logs/hw/summary.md](../test/logs/hw/summary.md)。
+
 ## 常用命令
 
 ```bash

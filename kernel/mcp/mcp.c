@@ -377,7 +377,7 @@ static void send_initialize(const jid_t *id)
                   "\"capabilities\":{\"tools\":{\"listChanged\":false}},"
                   "\"serverInfo\":{\"name\":\"%s\",\"version\":\"%s\"},"
                   "\"instructions\":\"tudouOS kernel MCP over UART lines; "
-                  "filter non-JSON console lines.\"}}}\r\n",
+                  "filter non-JSON console lines.\"}}\r\n",
                   ids, POTATO_NAME, POTATO_VERSION);
 }
 

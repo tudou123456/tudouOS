@@ -6,6 +6,9 @@
 void uart_init(void);
 void uart_irq_init(void);      /* 配置 RX FIFO 中断（intc_init 之后调用） */
 void uart_putc(char c);        /* '\n' 自动扩展为 "\r\n" */
+void uart_puts_raw(const char *s); /* 同 uart_puts 但绕过输出抽头（M7 串口 MCP
+                                    * 帧专用；仍维护行边界标记，防帧被 tap 抓取） */
+void uart_line_begin(void);    /* K2：异步输出行首保护——中线未收行时先补 CRLF */
 void uart_mark(char c);        /* 诊断探针：直写 FIFO，不查状态 */
 void uart_puts(const char *s); /* 无格式字符串，不改写换行符 */
 int  uart_getc(void);          /* 无数据返回 -1（从 RX 环形缓冲取） */

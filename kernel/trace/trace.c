@@ -5,6 +5,7 @@
 #include "sb.h"
 #include "time.h"
 #include "trace.h"
+#include "uart.h"
 
 /*
  * 最小追踪环（D-18 修正后的真实并发模型）：
@@ -219,6 +220,9 @@ static unsigned export_range(uint32_t from_seq, unsigned max_n)
     if (max_n != 0u && n > max_n) {
         n = max_n;
     }
+    if (n > 0u) {
+        uart_line_begin(); /* K2：后台流式行不从控制台提示符后接续 */
+    }
 
     for (unsigned i = n; i > 0u; i--) {
         uint16_t idx = (uint16_t)((uint16_t)(head - i) & (POT_TRACE_CAPACITY - 1));
@@ -293,6 +297,9 @@ static unsigned export_imp_range(uint32_t from_seq, unsigned max_n)
     unsigned n = (unsigned)(total - from_seq);
     if (max_n != 0u && n > max_n) {
         n = max_n;
+    }
+    if (n > 0u) {
+        uart_line_begin(); /* K2：后台流式行不从控制台提示符后接续 */
     }
 
     for (unsigned i = n; i > 0u; i--) {

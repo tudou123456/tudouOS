@@ -9,6 +9,12 @@ CPU1 需先经 `SYSTEM_CORE_1_CONTROL_0` 释放复位才认入口寄存器，释
 super watchdog 用 `RTC_CNTL_SWD_CONF` 关闭；M9 的 CPU1 tick / IPI / 绑核任务 /
 负载均衡迁移全部在板上实测通过。详见文末「第二轮」一节。
 
+**网络补充（2026-10-19 事实核查）：** ESP32-S3 硅片没有内部以太网 MAC，
+「真机 EMAC / DesignWare GMAC / RTL8211 PHY」的旧记录不成立（见
+[ethernet.md](ethernet.md) §8）；QEMU 的 open_eth 只是机器模型测试外设。真机远程
+MCP 当前走串口传输（[serial-mcp.md](serial-mcp.md)），ARP/ping/UDP 仅在 QEMU
+验证；真机以太网需外挂 SPI 模块（未实现/未到货，见 §6）。
+
 ## 已实证事实（按可信度排序）
 
 1. **ROM→内核启动链路 ✅**：potato_boot.bin（flash 0x0）双 RAM 段加载、
@@ -144,12 +150,32 @@ stack=0x3fcc5d90-0x3fcc9d90 heap=0x3fcc9d90-0x3fcdc700`。
 
 - **XIP 路径未修**：第一轮全部嫌疑（ROM Cache_Enable_ICache、flash 时序、PRELOAD、
   SWD 干扰等）未逐一验证；hw 默认全 RAM 后不再阻塞，`--xip` 仅作实验开关。
-- **真机外设**：hw 的 DW GMAC 后端未实现（`emac_init` 跳过、网络禁用），所以 M7
-  网络栈在真机未跑。
+- **真机以太网**：ESP32-S3 硅片没有内部以太网 MAC（DesignWare GMAC + 外部 PHY
+  方案不成立，见 [ethernet.md](ethernet.md) §8）；真机以太网需外挂 SPI 模块
+  （W5500/DM9051 类，**未实现/未到货**），在此之前 ARP/ping/UDP 只在 QEMU 验证；
+  真机远程 MCP 走串口传输（[serial-mcp.md](serial-mcp.md)）。
 - **真机 CPU1 tick 抢占**（`smp preempt on`）：代码路径含 +84 修复，默认关，未做真机
   稳定性验证。
 - **调试开关**：`TUDOU_BOOT_TRACE=1` 会开启串口阶段标记；改该变量后必须
   `python tools/build.py --platform hw --clean`，否则增量编译会沿用旧目标文件。
+- **真机待办基线（K1/K2 已修复，K3 保留观察）**：
+  - **K1 启动 tick 瞬态——已修复**（`kernel/time/ccompare_tick.c`：`tick_irq_arm()`
+    重基准 `g_last_fire_cc/g_next_cc` 并清 `g_jit_seeded`，poll/handler 抖动统计跳过
+    首个跨启动窗口样本）。真机新固件 READY 后连测 `jit_min≈974–999us`、
+    `jit_max≈1000–1025us`，3s 空闲不变；早前 ≈45ms/79ms 记录即该一次性启动窗口
+    样本，稳态抖动约 0.9–1.0ms。`TICK_GAP` 观测仍保留。
+  - **K2 输出行首保护——已修复**（新增 `uart_line_begin()`：输出前若行未结束先补
+    CRLF；`trace stream on` 后台 TRJ 导出与 `obs health` 打印前调用）。真机
+    `stream on` 并发下 `potato> [POTATO]` 粘连计数 0，67 条 TRJ 行行首干净、JSON
+    可完整解析；行尾契约未变，既有测试锚点不受影响。
+  - **K3 trace 环覆盖（设计观察，不修代码）**：1kHz tick 洪流使 256 项 trace 环
+    覆盖约 128ms，`obs_health` 读活环非原子；回归台已改用 `trace meta`/`trace imp`
+    计数增量做事件断言。若需长窗口事件回放，应降低 tick 事件入环频率或扩容。
+  - **极端并发限制**：UART 无硬行锁；`trace stream on` + 高频串口 MCP 长响应时
+    建议先 `trace stream off`（详见 [serial-mcp.md](serial-mcp.md) §7）。
+  - **真机串口自动回归台已完成**（`test/hw_runner.py` + `test/hw_cases/`，72 用例，
+    M1–M9 全量 70 PASS / 0 FAIL / 2 显式 SKIP，见
+    [test/logs/hw/summary.md](../test/logs/hw/summary.md)）；48h 长稳 soak 未跑。
 
 ### 7. 最终带板验收（正式包，2026-10-17 21:2x）
 
@@ -164,3 +190,36 @@ stack=0x3fcc5d90-0x3fcc9d90 heap=0x3fcc9d90-0x3fcdc700`。
   `smp spawn any 4` 受上限 4 约束 `made=2`，两核 work 计数持续增长。
 - 结论：真机生产镜像启动稳定、控制台完整、SMP 双核通路可用；hw 全 RAM 布局
   与 `SYSTEM_CORE_1_CONTROL_0`/SWD 两处真机差异均已固化在代码里。
+
+### 8. 真机 M1–M9 全量回归 + 串口 MCP 验收（2026-10-19 晚，第三轮）
+
+- 平台：普通 ESP32-S3 开发板（无网口，CH340/COM3，115200）。ESP32-S3 硅片无
+  内部以太网 MAC（[ethernet.md](ethernet.md) §8），远程 MCP 改走串口帧传输
+  serial-json（[serial-mcp.md](serial-mcp.md)）。
+- 回归台：`test/hw_runner.py` + `test/hw_cases/`（72 条用例，M1–M9 分组；逐用例
+  复位 + 等 READY；与 QEMU 台架并存、`test/cases/` 互不污染）：
+  `py -3.14 -m test.hw_runner --port COM3 --keep-going`。
+- 结果：**PASS=70 / FAIL=0 / TIMEOUT=0 / SKIP=2（显式真机限制）**，退出码 0；
+  `--smoke` 9/9 PASS。报告与逐条日志：
+  [test/logs/hw/summary.md](../test/logs/hw/summary.md)。旧固件（`19:43:33`）与
+  K1/K2 修复固件（`20:21:35`）两轮均为此结果（`build/_hw_full2.log`、
+  `build/_hw_full3.log`）。
+- 串口 MCP 验收：`py -3.14 tools/serial_mcp.py --port COM3 selftest` PASS
+  （hello→tools/list 6 工具→ping→sysinfo→dump；rx_frames=4 bad_frames=0）；
+  跨进程 fs 往返、同 seq 重放不重复执行、`--reset` 复位恢复、`--stdio` MCP
+  客户端桥全通（证据 `build/_serial_mcp_*.log`）。
+- K1/K2 修复真机验证：K1 启动瞬态不再计入 `jit_max`（稳态 ≈1.0ms，见 §6）；
+  K2 `trace stream on` 并发下提示符粘连 0、TRJ 行首干净（`build/_hw_k1k2_check3.log`）。
+- **最终验收（Lead 独立复跑，2026-10-19 20:3x）**：`--platform hw --clean`
+  干净重建（`potato_boot_hw.bin` 85952 B，启动身份 `[POTATO] build Oct 19 2026
+  20:29:27`）→ `esptool write-flash 0x0` → `Hash of data verified`
+  （`build/_final_hw_flash2.log`）→ `tools/serial_mcp.py --reset selftest` PASS
+  （`build/_final_hw_selftest2.log`）→ 全量回归 **70 PASS / 0 FAIL / 0 TIMEOUT /
+  2 SKIP / 未执行 0，exit 0**（`build/_final_hw_runner4.log`）；同一源码 QEMU
+  全量 **67/67**、exit 0（`build/_final_qemu_runner3.log`）。
+- 顺带修复：`kernel/mcp/mcp.c::send_initialize()` 响应多一个 `}` 的既有 bug
+  （initialize 响应原为非法 JSON；对 UDP/串口通道均生效）；`test_obs.py`
+  `test_obs_panic_dump` 的半行快照 flake（分析器改喂最后一个完整行）。
+- 结论：**M1–M9 控制面全部在真机跑通**。剩余真机缺口仅两项已知限制：以太网需
+  外挂 SPI 模块（W5500/DM9051，未实现/未到货）、CPU1 tick 抢占（默认关、未验证）；
+  另 K3（trace 环覆盖）为设计观察、K1/K2 已修复并真机验证，不阻塞功能验收。

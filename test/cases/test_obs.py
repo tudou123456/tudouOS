@@ -222,12 +222,19 @@ def test_obs_panic_dump(ctx):
     assert panic["reason"] == "panic", panic
     time.sleep(0.5)
 
-    evs = _events(ctx.serial.text)
+    # 流式捕获的快照随时可能停在半行（读线程在行中间截断）：只取最后一个
+    # 换行符之前的完整行交给分析器，避免把半条 TRJ 误计为解析失败。
+    snap = ctx.serial.text
+    cut = snap.rfind("\n")
+    if cut >= 0:
+        snap = snap[: cut + 1]
+
+    evs = _events(snap)
     assert any(e.get("imp") == 1 for e in evs), "PANIC 之后未导出重要事件副环"
     inj = [e for e in evs if e["ev"] in ("INJECT_BEGIN", "INJECT_END")]
     assert len(inj) >= 1, "副环未保留注入锚点"
 
-    report, proc = _analyze(ctx.serial.text, "panic")
+    report, proc = _analyze(snap, "panic")
     assert proc.returncode in (0, 1), proc.stderr[-400:]
     assert report["source"]["unparsed_lines"] == 0, report["source"]
     assert report["source"]["panics"] >= 1, report["source"]

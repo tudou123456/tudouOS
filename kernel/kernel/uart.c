@@ -124,6 +124,42 @@ void uart_puts(const char *s)
     }
 }
 
+/* M7：绕过输出抽头的发送（串口 MCP 帧用）。帧字节若再被 tap 抓取会自激
+ * 重发，所以不得调用 g_uart_sink；但行边界语义必须照旧维护：调度器靠
+ * g_tx_midline 把 tick 抢占推迟到行边界，否则帧会被任务切换切成两截。 */
+static void uart_putc_raw(char c)
+{
+    if (c == '\n') {
+        uart_putc_raw('\r');
+    }
+    while (ST_TXFIFO_CNT(mmio_read(UART_STATUS)) != 0u) {
+    }
+    mmio_write(UART_FIFO, (uint32_t)(uint8_t)c);
+    if (c == '\n') {
+        g_tx_midline = 0;
+    } else {
+        g_tx_midline = 1;
+    }
+}
+
+void uart_puts_raw(const char *s)
+{
+    while (*s != '\0') {
+        uart_putc_raw(*s++);
+    }
+}
+
+/* K2：异步输出（obs 后台流式 JSONL 等）的行首保护：控制台提示符打印后
+ * 会处于中线（g_tx_midline=1）；若后台任务此时插行，直接写会把
+ * "potato> [POTATO][TRJ] {...}" 粘成一行，行级解析器认不出行首前缀。
+ * 先补 CRLF 再输出即可保证行首干净。 */
+void uart_line_begin(void)
+{
+    if (g_tx_midline != 0) {
+        uart_puts("\r\n");
+    }
+}
+
 int uart_getc(void)
 {
     if (g_rx_head != g_rx_tail) {

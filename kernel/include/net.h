@@ -13,10 +13,10 @@
  *     描述符 8B：{len_flags, buf_ptr}；TX_BD_NUM 默认 0x40 → 0..63 TX、
  *     64..127 RX；中断经中断矩阵源 0（ETS_ETH_MAC_INTR_SOURCE =
  *     ETS_WIFI_MAC_INTR_SOURCE）接到 CPU 中断（本内核用 int20，level2）。
- *   真机 S3 的 EMAC 是 DesignWare GMAC（esp_eth_mac_esp），寄存器语义
- *   与 OpenCores 不同 → 本文件把「MAC 硬件」抽象成 emac_* 一组接口，
- *   QEMU 后端已实现；真机后端（DW GMAC + esp_eth）为带板待办，见
- *   docs/ethernet.md。协议层（net.c）与后端无关，两端同源。
+ *   真机 S3 硅片没有内部 EMAC（IDF v5.3.1 的 ETH_USE_OPENETH 仅 QEMU，
+ *   esp_hal_emac 无 esp32s3 子目录）；以太网只能经 SPI 扩展芯片（W5500 /
+ *   DM9051 等，待硬件到货）。真机远程控制面因此走串口 MCP 通道
+ *   （netmcp 的 serial transport，见 docs/serial-mcp.md）。
  *
  * 协议层（kernel/net/net.c）：ARP 缓存 / IPv4 / ICMP echo / UDP 单端口
  * 远程通道（kernel/net/netmcp.c，带 epoch+seq 纪元与去重重放）。
@@ -99,5 +99,13 @@ int  netmcp_peer_known(void);
 uint32_t netmcp_stat(int which);      /* 0rx 1tx 2req 3dup 4replay 5resync
                                        * 6hello 7bad 8gaps 9ack 10txseq
                                        * 11pending 12trunc */
+
+/* ---- 串口 MCP 传输（真机：无 EMAC 时由 net_start 启用） ----
+ * 帧：host→device = 0x02 "@@MCP <crc16> <json>\r\n"
+ *     device→host = "@@MCP <crc16> <json>\r\n"（单行，≤1600B） */
+void netmcp_init_serial(void);        /* transport=serial，epoch=1，注册 UART 抽头 */
+int  netmcp_serial_active(void);      /* 当前传输是否为串口 MCP */
+void netmcp_serial_rx(const char *line, uint32_t len); /* 控制台交来的一整行帧 */
+void netmcp_serial_tick(void);        /* console 空闲时驱动 hello/重放定时器 */
 
 #endif /* TUDOU_NET_H */

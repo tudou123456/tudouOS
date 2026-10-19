@@ -5,13 +5,20 @@
 QMP 测试台自动验收；`--platform hw` 产出全 RAM 单镜像，已用 esptool
 在 ESP32-S3 开发板上带板验证（启动、命令面、M9 双核全流程）。
 
-> 当前阶段：**M9 已完成**（M1~M9 全部交付）。最新增量：M7 以太网 +
-> 远程 MCP 通道（QEMU open_eth，`docs/ethernet.md`）、M8 可观测体系
-> （JSONL 导出/健康快照/注入/`tools/ai_analysis.py`，`docs/observability.md`）、
-> M9 双核 SMP（CPU1 启动/核间中断/负载均衡，`docs/smp.md`）。
+> 当前阶段：**M9 已完成**（M1~M9 全部交付）。最新增量：M7 远程 MCP 通道
+> （UDP 信封：纪元/序号/回执/去重/重同步；以太网仅 QEMU open_eth——ESP32-S3
+> 硅片没有内部以太网 MAC，真机远程 MCP 走串口传输，见
+> `docs/serial-mcp.md`）、M8 可观测体系（JSONL 导出/健康快照/注入/
+> `tools/ai_analysis.py`，`docs/observability.md`）、M9 双核 SMP（CPU1
+> 启动/核间中断/负载均衡，`docs/smp.md`）。
 > QEMU 测试台 **67 用例全绿**（M1~M9 + 缺陷修复回归）。
 > 真机带板验证已完成（2026-10-17：RAM-only 布局稳定启动、CPU1 上线、
 > IPI/绑核/负载均衡实测通过，`docs/hardware-bringup.md`）。
+> **真机 M1–M9 全量回归（2026-10-19）**：串口自动回归台
+> `test/hw_runner.py`（72 用例，`test/hw_cases/`）在普通 ESP32-S3 开发板上
+> **70 PASS / 0 FAIL / 2 显式 SKIP**；真机远程 MCP 走串口帧传输
+> （`tools/serial_mcp.py` + `docs/serial-mcp.md`）。报告见
+> [test/logs/hw/summary.md](test/logs/hw/summary.md)。
 > QEMU 构建走 flash XIP 执行；真机构建默认全 RAM（代码 IRAM、只读数据 DRAM）；
 > tick 中断驱动（v5，独立于任务检查点）。产品定位与四大核心支柱（内核原生 MCP
 > 消息总线 / 仿真硬件双端同源 / 内核可观测 / AI 交互低抖动调度）见
@@ -26,6 +33,7 @@ kernel/          土豆内核（boot.S 启动、UART、mini printf、命令循�
 tools/           check_env.py 环境体检 / build.py 一键构建
 qemu/            run_qemu.py 交互/测试台/gdbstub 三种模式拉起 QEMU
 test/            QMP 测试台（runner + qmp_client + serial_tap + cases/）
+                 真机串口回归台（hw_runner + hw_serial + hw_cases/）
 docs/            架构蓝图、路线图、QMP 测试台手册
 build/           构建产物（kernel.elf / potato_boot.bin / flash_image.bin）
 third_party/     本地工具链与 QEMU（不入库）
@@ -77,11 +85,28 @@ esptool --chip esp32s3 --port COMx --baud 921600 \
 - `--platform hw --xip` 保留旧的 flash XIP 两段烧录实验路径
   （真机 0x42 取指目前不可用，仅供继续排查）。
 - QEMU 镜像（`python tools/build.py` 默认）仍为 XIP 布局，供测试台使用。
+- **真机网络**：ESP32-S3 硅片没有内部以太网 MAC（「DesignWare GMAC + 外部
+  PHY」方案不成立，事实核查见 `docs/ethernet.md` §8）；`net`/`ping` 的以太网
+  通道仅在 QEMU 有效，真机远程 MCP 走**串口传输**——协议细节见
+  [docs/serial-mcp.md](docs/serial-mcp.md)，主机侧可用
+  `py -3.14 tools/serial_mcp.py --port COM3 selftest` 做握手 + `tools/list` 自检；
+  真机以太网需外挂 SPI 模块（W5500/DM9051 类），尚未实现/到货。
 
-## 测试用例（M1~M9 验收，67 个全绿）
+## 测试用例（QEMU 67 个全绿 + 真机 72 条串口回归）
 
-下表为 M1~M6 核心用例；M7/M8/M9 用例（19 个）见各自文档与
+下表为 M1~M6 核心用例（QEMU）；M7/M8/M9 用例（19 个）见各自文档与
 `test/cases/test_m7*.py`、`test_m8*.py`、`test_m9*.py`、`test_build_hw_platform.py`。
+
+**真机串口回归台**（`test/hw_runner.py` + `test/hw_cases/`，72 条，M1–M9 全覆盖）：
+
+```powershell
+py -3.14 -m test.hw_runner --port COM3 --list        # 列出用例
+py -3.14 -m test.hw_runner --port COM3 --smoke       # 9 条冒烟
+py -3.14 -m test.hw_runner --port COM3 --keep-going  # 全量回归
+```
+
+2026-10-19 验收结果 **70 PASS / 0 FAIL / 2 显式 SKIP**（QMP 断线冻结、QEMU XIP
+布局差异，均有替代覆盖），报告见 [test/logs/hw/summary.md](test/logs/hw/summary.md)。
 
 | 用例 | 验证 |
 | --- | --- |
@@ -145,8 +170,10 @@ exhaust|churn|off`（分配回归/碎片合并/越界注入/耗尽恢复/soak �
 
 **网络命令**（M7）：`net [arp|link down|up|ip <a.b.c.d> [gw]]`、
 `ping <a.b.c.d>`（ICMP echo）、`netmcp [dump|test|port <p>|peer <a.b.c.d> <port>]`
-（UDP 远程 MCP 通道：纪元/序号/回执/去重/重同步，详见
-[docs/ethernet.md](docs/ethernet.md)）。
+（UDP 远程 MCP 通道：纪元/序号/回执/去重/重同步）。注意以太网侧仅在 **QEMU
+open_eth** 下有效（S3 真机无内部 EMAC）；真机远程 MCP 走串口传输，见
+[docs/serial-mcp.md](docs/serial-mcp.md)，以太网细节与限制见
+[docs/ethernet.md](docs/ethernet.md)。
 
 **可观测命令**（M8）：`trace [n]|jsonl [n]|imp [n]|stream on|off|pump|meta|health`、
 `health`（单行健康快照）、`obs panic`、`inject leak|hang|spin|off [arg]`

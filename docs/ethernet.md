@@ -1,20 +1,23 @@
 # 以太网与远程 MCP 通道（M7）
 
-M7 给内核接上「一根网线」：MAC 硬件后端（QEMU 下是 OpenCores `open_eth` 模型，
-真机是 ESP32-S3 的 DesignWare GMAC）、ARP/IPv4/ICMP/UDP 协议层、以及一条
+M7 给内核接上「一根网线」：MAC 硬件后端（QEMU 下是 OpenCores `open_eth` 模型；
+**ESP32-S3 硅片没有内部以太网 MAC**，见 §8）、ARP/IPv4/ICMP/UDP 协议层、以及一条
 **UDP 上的远程 MCP 通道**——让主机侧的 AI/脚本不必抢串口，也能像本地 `mcp on`
 一样调用内核工具。
 
 与 M8 文档一样，本文只写**代码里真实存在的行为**；QEMU 与真机的差异、以及
 「哪些是 QEMU 模型专有现象」都明确标出，避免把测试台行为当成硬件规格。
+**真机没有以太网控制器**：真机远程 MCP 改走串口 MCP 传输
+（[serial-mcp.md](serial-mcp.md)），以太网协议栈（ARP/ping/UDP）当前只在 QEMU
+`open_eth` 下验证，详见 §8。
 
 ## 1. 分层
 
 | 层 | 文件 | 职责 |
 |---|---|---|
-| MAC 硬件后端 | `kernel/net/emac.c` | OpenCores MAC + DP83848C PHY 子集：寄存器/描述符、TX/RX 环、中断、探测 |
+| MAC 硬件后端 | `kernel/net/emac.c` | OpenCores MAC + DP83848C PHY 子集：寄存器/描述符、TX/RX 环、中断、探测（**仅 QEMU `open_eth` 测试外设**；真机 S3 无内部 EMAC，见 §8） |
 | 协议层 | `kernel/net/net.c` | ARP、IPv4、ICMP echo、UDP；net 后台任务；可重入协作锁；统计 |
-| 远程 MCP | `kernel/net/netmcp.c` | UDP 信封、会话纪元、去重/重放/重同步、UART 抽头、计数 |
+| 远程 MCP | `kernel/net/netmcp.c` | 远程 MCP 信封/会话纪元/去重/重放/重同步（UDP 传输 + 真机串口传输）、UART 抽头、计数 |
 | 控制台 | `kernel/kernel/console.c` | `net` / `ping` / `netmcp` 命令族 |
 | MCP 适配器 | `kernel/mcp/*`（M6） | 被远程请求复用：`mcp_handle_line()` 解析并执行 JSON-RPC 行 |
 | 测试台 | `test/net_peer.py`、`test/cases/test_m7*.py` | 主机侧 UDP 对端 + QMP 用例 |
@@ -29,20 +32,25 @@ UDP 报文 ─► net 任务 ──► netmcp_udp_rx() ──► mcp_handle_line
 内核主动发出的报文只有两类：`hello`（探活/让对端学习）和 `resp`（响应/重放），
 都从 `netmcp_send()` 出网。远程请求是「主机 → 内核」方向唯一的触发源。
 
+> UDP 这条入口只在 QEMU（`open_eth`）下可用：ESP32-S3 硅片没有内部以太网 MAC，
+> 真机远程 MCP 走串口 MCP 传输（[serial-mcp.md](serial-mcp.md)），不经过 UDP。
+> 见 §8。
+
 ## 2. MAC 硬件后端（`kernel/net/emac.c`）
 
 ### 2.1 QEMU 挂载点
 
 QEMU `esp32s3` 机器在 `esp32s3_init_openeth()`（`build/_qemu_src/hw/xtensa/esp32s3.c`）
 里调用 `qemu_create_nic_device("open_eth", true, NULL)` 创建模型，并把它的两个
-sysbus MMIO 区分别叠到真机 EMAC 地址上：
+sysbus MMIO 区分别叠到 0x600CD000 一带（旧文档按「EMAC 窗口」记录的地址）：
 
 * 寄存器区 → `DR_REG_EMAC_BASE`（**0x600CD000**）；
 * 描述符区 → `DR_REG_EMAC_BASE + 0x400`（**0x600CD400**，1KB = 128 × 8B）；
 * 中断 → 中断矩阵 `ETS_ETH_MAC_INTR_SOURCE`（源 0）。
 
-因此 `kernel/net/emac.c` 的地址常量与真机 EMAC 基址一致，但它驱动的是
-**OpenCores 寄存器语义**。真机 S3 是 DW GMAC（寄存器语义不同），见 §8。
+因此 `kernel/net/emac.c` 的地址常量就是 QEMU 模型挂载地址；它驱动的是
+**OpenCores 寄存器语义**。这个控制器**只存在于 QEMU 机器模型**：ESP32-S3 硅片
+没有内部以太网 MAC（事实核查见 §8）。
 
 > 测试台注意：`esp32s3` 机器在**不传 `-nic` 时也会自动创建默认网卡**。要验证
 > 「无网卡」路径必须显式 `-nic none`（`test/cases/test_m7_nodev.py` 就是这么做的）。
@@ -89,7 +97,8 @@ PHY 用 MII 管理接口读 `MII_BMSR`（寄存器 1）的 `LINK`=bit2 判断链
 「先写不带 `TXD_RD` 的长度 → 写 `buf_ptr` → 最后写带 `TXD_RD` 的长度」；
 漏掉 `TXD_RD` 模型永远不发包，`RD` 也永远不会被清，驱动会卡在自旋里。
 `emac_send()` 把顺序固化成代码注释，并用有界自旋（200000 次）等 `RD` 清零，
-超时记 `tx_err`（真机发送是异步的，这个有界等待就是为真机准备的）。
+超时记 `tx_err`（有界自旋是防御性设计，避免模型异常时永久卡死；S3 真机没有
+这个 MAC，见 §8）。
 
 发送侧：帧长必须在 14..1518 之间；物理层无链路直接 `tx_drop`；短帧由驱动补零到
 64B（`PAD` 不交给模型，见下）。
@@ -111,7 +120,8 @@ CPU **int20（level2）**。ISR 只做三件事：读 `INT_SOURCE`、按 `RXB/TX
 
 ### 2.4 探测与「无网卡」路径
 
-`emac_init()` 的探测是 QEMU 模型语义的读写往返校验：
+探测**只在 QEMU 构建执行**（hw 构建在探测前直接按「无此控制器」跳过，见 §8），
+判据是 QEMU 模型语义的读写往返校验：
 
 1. 写 `MODER.RST`，读回 `MODER` 应为 `0x800`（模型先复位再把 `MODER` 覆盖为
    写入值）；
@@ -125,7 +135,9 @@ CPU **int20（level2）**。ISR 只做三件事：读 `INT_SOURCE`、按 `RXB/TX
 `net_start()` 随后看到 `emac_present()==0`，打印
 `[POTATO][NET] no EMAC device: ethernet disabled` 并返回成功：**没有以太网
 不是启动失败**，控制台与本地 MCP 不受影响。这条路径被
-`test_m7_nodev_absent_is_explicit_and_harmless` 覆盖（`-nic none`）。
+`test_m7_nodev_absent_is_explicit_and_harmless` 覆盖（`-nic none`）。真机构建在
+同一分支里额外启用**串口 MCP 传输**（具体锚点与行为见
+[serial-mcp.md](serial-mcp.md)），见 §8.2。
 
 驱动注册：`POT_DRIVER_REGISTER(net, emac_drv_init, 20)`，在 .pot_drivers 段里
 按优先级初始化，UART 之后。
@@ -405,32 +417,85 @@ guest 的 UDP 端口发起连接；所以由内核周期发 hello/响应，主�
 当前状态（2026-10-17）：`--filter m7` **6/6 通过**，全量回归以 `test.runner`
 实际输出为准（每用例新起一台 QEMU，日志在 `test/logs/`）。
 
-## 8. 真机后端：ESP32-S3 的 DW GMAC（带板待办）
+## 8. 真机没有「以太网后端」：ESP32-S3 无内部 EMAC
 
-QEMU 模型 ≠ 真机硬件。真机 ESP32-S3 的以太网控制器是 **DesignWare GMAC**
-（DW GMAC，配合外部 PHY，如 RTL8211），寄存器语义与 OpenCores 完全不同：
+> **核查结论（2026-10-19）**：ESP32-S3 硅片**没有内部以太网 MAC**，也没有
+> (R)MII/外部 PHY 接口。此前文档设想的「真机 DesignWare GMAC 后端（`emac_dw.c`，
+> 配 RTL8211 类 PHY）」**前提不成立**，相关规划已从文档删除。
 
-* 帧传输用 DMA 描述符环（`GMAC_DMA_CH*_TX/RX_BASE` 等），不是「写 8B 描述符
-  就触发发送」的 MMIO 模型；
-* MAC 地址、过滤、校验和卸载、PHY 管理（MDIO 时钟分频、GMAC_MDIO_ADDR/DATA）
-  的寄存器布局都不同；
-* FCS 行为依 `GMAC_CR`/`GMAC_MAC_CONFIG` 配置而定，`fcs_trim` 可能为 0 或 4，
-  不能照搬 QEMU 的「模型补 4B 零 FCS」；
-* 发送是异步完成（靠 TX 完成中断/描述符回写），当前 `emac_send()` 的 200000 次
-  有界自旋就是为这个留的余量；
-* 中断经中断矩阵不同源号进入，需重新核对 `ETS_*` 映射与 level；
-* 网络包需要 cache 对齐/uncached 访问（S3 的 DMA 限制），描述符与缓冲的
-  属性要在 PAL 层处理。
+证据（按可信度排序）：
 
-代码把硬件差异收敛在 `emac_*` 接口后面（`emac_present/init/send/recv/link_up/
-int_enable/set_mac/set_promisc/set_fcs_trim/get_stats`），DW GMAC 后端应作为
-**另一个后端文件**（例如 `emac_dw.c`）按 `TUDOU_PLATFORM`（PAL 双后端思路）
-或驱动优先级选择接入，而不是在 `emac.c` 里加 `#if`。当前 `emac_init()` 的探测
-判据（`MODER==0x800 && TX_BD_NUM==0x40`）是 QEMU 模型语义，真机必然判缺席——
-DW 后端落地时要替换这段探测。
+* **ESP-IDF v5.3.1 `components/esp_eth/Kconfig`**：`ETH_USE_OPENETH` 的 help
+  原文「This driver is not supported when running on a real chip」——OpenCores
+  MAC 驱动只用于 QEMU
+  （[Kconfig](https://github.com/espressif/esp-idf/blob/v5.3.1/components/esp_eth/Kconfig)）。
+* **ESP-IDF master `components/esp_hal_emac/`** 只有 `esp32`、`esp32p4`、
+  `esp32s31` 三个子目录，**没有 `esp32s3`**
+  （[目录树](https://github.com/espressif/esp-idf/tree/master/components/esp_hal_emac)）。
+* **Espressif GitHub issue #17606**（IDFGH-16485，closed—Won't Do）：乐鑫明确
+  回复 ESP32-S3 不支持 (R)MII 连接外部 PHY（ESP32 / ESP32-P4 支持），要接有线
+  网络请用 SPI-Ethernet 适配器
+  （[issue](https://github.com/espressif/esp-idf/issues/17606)）。
+* **ESP-IDF v5.3.1 ESP32-S3 文档 `api-reference/network/esp_eth.html`**：esp32s3
+  只讲 external SPI-Ethernet modules（DM9051 / W5500 / KSZ8851SNL 一类）
+  （[esp_eth](https://docs.espressif.com/projects/esp-idf/en/v5.3.1/esp32s3/api-reference/network/esp_eth.html)）。
+* **本仓库 QEMU 侧**：`build/_qemu_src/hw/xtensa/esp32s3.c:324-349` 的
+  `esp32s3_init_openeth()` 由 QEMU 机器模型自己调用
+  `qemu_create_nic_device("open_eth", ...)`，把 MMIO 叠到 `DR_REG_EMAC_BASE`
+  （`build/_qemu_src/include/hw/misc/esp32s3_reg.h:77`，0x600CD000）。这是
+  **QEMU 测试外设**：机器模型为了测试以太网协议栈自建的设备；真机硅片上没有
+  这个控制器，0x600CD000 也不是可用外设。
 
-另按 `docs/architecture.md` 的 M7 行说明：**WiFi 只能真机调**，不在本里程碑
-范围内；本里程碑的「真机」部分即上述 DW GMAC 带板工作。
+### 8.1 当前实现（真机）
+
+`kernel/net/emac.c` 在 hw 构建里**直接跳过**（`g_present=0`，且不碰 0x600CD000：
+带板实证盲读该地址会因 EMAC 时钟未开而挂死总线）；`net_start()` 看到
+`emac_present()==0` 后打印 `[POTATO][NET] no EMAC device: ethernet disabled`，
+随后在 hw 构建启用串口 MCP 传输（当前代码打印
+`[POTATO][NET] remote MCP over serial enabled (transport=serial-json)`，锚点以
+[serial-mcp.md](serial-mcp.md) 为准）——**没有以太网不是启动失败**，控制台与
+本地 MCP 不受影响（见 §2.4）。
+
+> 说明：M7 早期文档里的「真机 DW GMAC 后端未实现」「`emac_dw.c`」措辞已随
+> 串口 MCP 改造从 `kernel/net/emac.c` 清理；真机分支的行为（跳过 + 优雅降级 +
+> 启用串口传输）语义未变。
+
+### 8.2 真机网络路线：串口 MCP 传输
+
+真机没有以太网，但**远程 MCP 通道仍然可用**：把 M7 远程 MCP 的同一套信封/
+会话语义（epoch、seq、ack、去重、重放、hello、resync）承载在 **UART 帧**上，
+不再依赖 UDP。主机侧脚本直接经 COM 口对话，不必经过 QEMU 的 SLIRP。
+
+* 协议细节、主机工具用法与真机验收证据只维护在
+  [serial-mcp.md](serial-mcp.md)，本文不复述。
+* 传输层与信封/会话语义分层：QEMU 用 UDP 传输、真机用串口帧传输，上层
+  去重/重放/纪元语义共用一套实现。
+* ARP / IPv4 / ICMP / UDP 帧链路（`kernel/net/net.c`）是**以太网专用**的，
+  真机不跑；真机上 `net` / `ping` 在无 EMAC 时不可用（优雅降级，见 §2.4）。
+
+### 8.3 可选路线：外挂 SPI 以太网模块（未实现）
+
+若将来真机要跑真正的 IP 网络（ARP/ping/UDP），S3 只能**外挂 SPI 以太网模块**
+（W5500 / DM9051 / KSZ8851SNL 等）：
+
+* 需要新写一个 **SPI MAC 后端**：与 `emac.c` 的 OpenCores 后端并列，实现同一套
+  `emac_*` 接口（`emac_present/init/send/recv/link_up/int_enable/set_mac/
+  set_promisc/set_fcs_trim/get_stats`），把 SPI 收发映射成「收帧/发帧」；
+* 上层 ARP/IPv4/ICMP/UDP（`net.c`）与远程 MCP 信封（`netmcp.c`）与 MAC 后端
+  无关，可原样复用；
+* 现状：**模块未到货、后端未实现、无验收数据**——不要把它当成已就绪能力。
+
+### 8.4 被推翻的旧说法（供检索与避免复燃）
+
+* ~~真机 ESP32-S3 的以太网控制器是 DW GMAC，需另写 `emac_dw.c`~~：S3 没有
+  内部 MAC，该后端文件不需要也不存在。
+* ~~真机需要 RTL8211 类外部 PHY、MDIO 时钟分频、DMA 描述符环、cache 对齐~~
+  ：这些是「带内部 GMAC 的芯片（如 ESP32 / ESP32-P4）」的问题，S3 不适用。
+* ~~M7 的「真机」部分 = DW GMAC 带板工作~~：M7 的真机部分 = **串口 MCP
+  传输**；以太网部分只在 QEMU 验证。
+
+> 另按 `docs/architecture.md` 的 M7 行：**WiFi 只能真机调**，不在 M7 范围；
+> 外挂 SPI 以太网同样不在 M7 验收范围内。
 
 ## 9. 已知限制
 
@@ -438,21 +503,26 @@ DW 后端落地时要替换这段探测。
    重组、无 IP 选项、无转发。
 2. ARP 缓存只有 4 项（60s TTL）；MAC 默认值固定，可 `emac_set_mac()` 改。
 3. MAC 环固定 2 个 TX / 4 个 RX 描述符，发送有界自旋；高吞吐场景需要扩环或
-   改异步完成（真机后端）。
-4. FCS 裁剪默认 4 是 **QEMU 模型**行为；真机后端需按硬件实际配置调整。
+   改异步完成（QEMU 模型语义；S3 真机无此 MAC）。
+4. FCS 裁剪默认 4 是 **QEMU 模型**行为（模型在帧尾补 4B 零 FCS）；协议层不
+   依赖这个固定值。
 5. 远程通道单端口、单对端、无认证加密，面向测试台/内网；`body`/报文有
    1200B/1400B 上限，超出显式失败并计数，不静默截断。
 6. `g_resyncs` 计数口径见 §6 的说明（陈旧纪元主动回 resync 不计数）。
-7. 无网卡探测（`MODER/TX_BD_NUM` 往返）是 QEMU 模型专有判据，真机 DW GMAC
-   必须替换；在此之前真机上电会走「ethernet disabled」优雅降级。
+7. **以太网链路只在 QEMU 验证**：真机 S3 无内部 EMAC；无网卡探测（`MODER/
+   TX_BD_NUM` 往返）是 QEMU 模型专有判据，真机构建不探测、直接优雅降级。
+8. **真机远程 MCP 走串口传输**（[serial-mcp.md](serial-mcp.md)，与 UDP 通道
+   同信封语义）；真机没有 UDP 通道，除非后续外挂 SPI 以太网模块（§8.3）。
 
 ## 10. 文件索引
 
 | 文件 | 说明 |
 |---|---|
-| `kernel/net/emac.c` | OpenCores MAC 后端（QEMU/板载），寄存器/描述符/中断/探测 |
+| `kernel/net/emac.c` | OpenCores MAC 后端（仅 QEMU open_eth 测试外设）；真机 S3 无内部 EMAC，直接跳过 |
 | `kernel/net/net.c` | ARP/IPv4/ICMP/UDP、net 任务、协作锁、统计与 `net` 输出 |
-| `kernel/net/netmcp.c` | UDP 远程 MCP：信封、纪元、去重/重放、tap、selftest |
+| `kernel/net/netmcp.c` | 远程 MCP 通道：信封、纪元、去重/重放、tap、selftest；UDP 传输 + 串口帧传输抽象 |
+| `docs/serial-mcp.md` | 真机串口 MCP 传输：帧格式、会话语义、主机工具、真机证据（真机网络现行路线，见 §8.2） |
+| `tools/serial_mcp.py` | 主机侧串口 MCP 工具（selftest / tools-list / call / raw / dump / `--stdio` 桥，`--port COM3`） |
 | `kernel/include/net.h` | 唯一接口头：`emac_*` 硬件抽象、`net_*` 协议层、`netmcp_*` 远程通道与统计结构 |
 | `kernel/kernel/console.c` | `net` / `ping` / `netmcp` 命令实现 |
 | `test/net_peer.py` | 主机侧 UDP 对端（信封编解码、ack、重同步跟随） |

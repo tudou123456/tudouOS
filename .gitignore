@@ -1,6 +1,9 @@
 build/
 third_party/
-test/logs/
+test/logs/*
+!test/logs/hw/
+test/logs/hw/*
+!test/logs/hw/summary.md
 __pycache__/
 *.pyc
 *.o

@@ -1148,6 +1148,61 @@ static void cmd_dispatch(char *line)
     potato_printf("[POTATO] unknown command: %s (try 'help')\r\n", line);
 }
 
+/* ---------- M7 串口 MCP：帧接收（STX 引导，单行） ----------
+ * 真机远程控制面走串口时，host 先发 0x02(STX) 再发 "@@MCP <crc> <json>\r\n"。
+ * STX 把「人类命令行」与「机器帧」彻底分开：帧模式不回显、不派发本地命令、
+ * 不受 CMD_BUF_LEN=264 限制（独立缓冲）。坏帧（超长/前缀/CRC/JSON）由
+ * netmcp_serial_rx 静默丢弃并计数、不回包，等对端重发；半截帧超时后复位
+ * 接收状态，避免吞掉后续本地命令。 */
+#define MCP_SER_FRAME_MAX 1600u
+static void console_mcp_frame(void)
+{
+    static char fr[MCP_SER_FRAME_MAX + 2u];
+    uint32_t n = 0;
+    int over = 0;
+    uint32_t last = pot_sched_now();
+
+    /* 进入帧模式前先收掉人类提示符半行（"potato> "）：否则输出抽头会把
+     * 响应行拼在提示符后面（行首不是 '{'）导致镜像/重放判定失败。 */
+    if (uart_tx_midline()) {
+        uart_putc('\n');
+    }
+
+    for (;;) {
+        int c = uart_getc();
+        if (c < 0) {
+            if ((pot_sched_now() - last) > 2000u) {
+                potato_printf("[POTATO][MCP] serial frame rx timeout (%u B) "
+                              "dropped\r\n", (unsigned)n);
+                return;
+            }
+            netmcp_serial_tick();
+            pot_task_sleep(1);
+            continue;
+        }
+        last = pot_sched_now();
+        if (c == '\r' || c == '\n') {
+            break;
+        }
+        if (!over) {
+            if (n < MCP_SER_FRAME_MAX) {
+                fr[n++] = (char)c;
+            } else {
+                over = 1;
+                n = MCP_SER_FRAME_MAX + 1u; /* 哨兵：超上限交给 netmcp 记 too_long */
+            }
+        }
+    }
+    if (over) {
+        netmcp_serial_rx(fr, MCP_SER_FRAME_MAX + 1u);
+        return;
+    }
+    if (n != 0u) {
+        fr[n] = '\0';
+        netmcp_serial_rx(fr, n);
+    }
+}
+
 void console_run(void)
 {
     static char buf[CMD_BUF_LEN];
@@ -1157,10 +1212,24 @@ void console_run(void)
         uart_puts("potato> ");
         volatile int n = 0;
         volatile int overlong = 0;
+        int framed = 0;
         for (;;) {
             int c = uart_getc();
             if (c < 0) {
+                if (netmcp_serial_active()) {
+                    netmcp_serial_tick(); /* 真机无 net 任务：hello/重放唯一 tick */
+                }
                 pot_task_sleep(1); /* 无输入让出 CPU（调度检查点） */
+                continue;
+            }
+            if (c == 0x02) { /* STX：串口 MCP 帧引导（只认纯文本行首） */
+                if (netmcp_serial_active()) {
+                    n = 0;
+                    overlong = 0;
+                    console_mcp_frame();
+                    framed = 1; /* 帧已处理：回外层直接重打提示符 */
+                    break;
+                }
                 continue;
             }
             if (c == '\r' || c == '\n') {
@@ -1185,6 +1254,9 @@ void console_run(void)
             } else {
                 overlong = 1; /* 继续吃掉本行剩余字符，收行时统一报错 */
             }
+        }
+        if (framed) {
+            continue;
         }
         if (overlong) {
             potato_printf("[POTATO] line too long (max %d), dropped\r\n",

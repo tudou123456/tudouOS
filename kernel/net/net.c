@@ -737,7 +737,14 @@ int net_task_running(void)
 int net_start(void)
 {
     if (!emac_present()) {
+        /* 保留原锚点行（测试/文档按此匹配）。真机 S3 无内部 EMAC，远程
+         * 控制面改走串口 MCP；QEMU 无 -nic 场景不启用（UDP 通道是回归对象）。 */
         potato_printf("[POTATO][NET] no EMAC device: ethernet disabled\r\n");
+#if TUDOU_PLATFORM != 0
+        netmcp_init_serial();
+        potato_printf("[POTATO][NET] remote MCP over serial enabled "
+                      "(transport=serial-json)\r\n");
+#endif
         return 0;
     }
     emac_int_enable();

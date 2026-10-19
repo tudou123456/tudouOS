@@ -1,4 +1,4 @@
-﻿# M9：双核（SMP）子系统
+# M9：双核（SMP）子系统
 
 > 适用：M9 阶段 1（CPU1 启动/IPI 骨架）+ 阶段 2（每核调度/亲和/负载均衡）。
 > 默认单核启动，`smp start` 显式拉起 CPU1 —— 单核行为与 M8 完全一致。
@@ -31,7 +31,7 @@
 | `SYSTEM_CPU_INTR_FROM_CPU_0..3` | `0x600C0030/34/38/3C` | 写 1 置起源线、写 0 清除 |
 | 中断矩阵 | `0x600C2000` | 每 CPU 0x800；CPU0 表 `base+4*src`，CPU1 表 `base+0x800+4*src` |
 | 矩阵项语义 | — | 写值 `& 0x1f` 为 CPU 中断号；**复位默认值 6**（`INTMATRIX_UNINT_VALUE`） |
-| ETS 源号 | — | `UART0=27`、`EMAC=0`、`FROM_CPU_INTR0..3=79/80/81/82` |
+| ETS 源号 | — | `UART0=27`、`EMAC=0`（仅 QEMU open_eth；S3 无内部 EMAC）、`FROM_CPU_INTR0..3=79/80/81/82` |
 | `SYSTEM_CORE_1_CONTROL_0` | `0x600C0000` | 真机 CPU1 运行控制：bit0 `RUNSTALL`、bit1 `CLKGATE_EN`、bit2 `RESETING`；**复位值 `0x04` = 复位保持**，真机必须先清 bit0/bit2、置 bit1，CPU1 才认入口地址；QEMU 自动拉起 CPU1，无需此步 |
 | `RTC_CNTL_SWD_CONF` | `0x600080B4` | super watchdog 配置；复位默认**使能**且无自动喂，约 8s 后 rst:0x12 复位；需写 bit30 关闭（`SWD_WPROTECT`=0xB8，key `0x8F1D312A`） |
 
@@ -128,6 +128,7 @@ call0 pot_smp_cpu1_main         // 不返回
   `g_ipi_pending[cpu]`；未定义原因计入 `ipi_unknown`。
 - `intc_irq_dispatch(level, frame_base)` 在 level2 按 pending&enable 分发 UART0(19)/EMAC(20)/IPI(21)；
   IPI 走 `pot_smp_ipi_handler(frame_base)`，**只计数/清源，不切换任务**（原因见 4.1）。
+  （EMAC(20) 只在 QEMU open_eth 下存在，S3 真机没有这个中断源。）
 
 ### 4.1 关键限制：level-2 中断帧不能用于上下文切换
 
@@ -299,8 +300,10 @@ python -m test.runner                  # 全量 67 例
   自有 tick、IPI 双向、绑核任务、负载均衡迁移均已带板实测通过；SWD 已关闭。
   仍未覆盖：真机上的 CPU1 tick 抢占（默认关）、两核缓存/内存序压力（S3 无硬件一致性，
   本实现靠锁）、`RTC_CNTL` 热复位后重新拉起 CPU1 的路径。
-- **真机外设**：hw 平台的 DW GMAC 后端未实现（`emac_init` 直接跳过，网络在真机禁用）；
-  UART0/EMAC 中断仍只在 CPU0 路由，CPU1 不碰外设。
+- **真机外设**：ESP32-S3 硅片没有内部以太网 MAC，`emac_init` 在真机构建直接跳过
+  （QEMU 的 open_eth 只是测试外设，见 [ethernet.md](ethernet.md) §8）；真机远程
+  MCP 走串口传输（[serial-mcp.md](serial-mcp.md)）。UART0/EMAC 中断仍只在 CPU0
+  路由，CPU1 不碰外设。
 - **抢占默认关**：当前以「空闲轮询 + 任务检查点 + 可选 tick 抢占」为主；真机验证后
   再评估默认开启。
 - **trace 单写者**：CPU1 事件用计数替代；若需全事件追踪，需 per-CPU 环或 IPI 交接。
