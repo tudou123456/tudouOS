@@ -36,7 +36,7 @@ jobs:
     runs-on: [self-hosted, windows, tudou-board]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Release gate (QEMU + hardware)
         run: >
           python tools/release_gate.py
