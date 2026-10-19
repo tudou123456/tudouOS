@@ -1,13 +1,16 @@
 # tudouOS 发布门禁验收报告（2026-10-19）
 
-- 验收对象：`D:\公司软件\tudouOS` 工作树（2026-10-19 独立审计修复后的最终源码；
-  **尚未提交**，因此本报告对应的是工作树状态，不是某个 commit）
+- 验收对象：`D:\公司软件\tudouOS`，分支 **`audit-fixes-2026-10-19`**，
+  提交 **`53d3038c487af124355c5a7394666739fce566a4`**（第 8 批，44 files，
+  1858 insertions / 362 deletions）
 - 验收命令：`py -3.14 tools/release_gate.py --rounds 2 --hw-port COM3`
 - 门禁结果：**通过（exit 0）**——QEMU 连续两轮 69/69 全绿 + 真机 74 例
   72 PASS / 0 FAIL / 0 TIMEOUT / 2 SKIP
-- 证据归档：`test/logs/gate-2026-10-19/`（含 SHA256 清单 `manifest.sha256`）
+- 证据归档：`test/logs/gate-2026-10-19/`（含 SHA256 清单 `manifest.sha256`
+  与可机检 `SHA256SUMS`）
 - 说明：`test/logs/` 与 `build/` 为 gitignored；本报告把关键哈希与结果内联，
-  原始日志保存在归档目录，便于本机复核。
+  原始日志保存在归档目录，便于本机复核。Mimosa 深度静态扫描（23:04）
+  `findings=0`；扫描覆盖状态为 partial，不构成完整安全保证。
 
 ---
 
@@ -119,4 +122,5 @@ P0/P1/P2/P3 阻塞项已全部关闭，可作为当前发布基线。
   需 `netmcp rw on` 显式授权。
 - CPU1 tick 抢占仍默认关（`smp preempt on` 可开）；CPU0 在真机默认开、
   QEMU 默认关（模型缺陷规避）。
-- 本报告对应工作树状态；提交后建议把 commit hash 补记到本报告与归档清单。
+- 本报告对应提交 `53d3038`；归档日志（`test/logs/gate-2026-10-19/`）为本机
+  gitignored 证据，可用 `SHA256SUMS` 逐项复核。
