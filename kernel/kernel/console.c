@@ -70,12 +70,24 @@ static void put_unsigned(uint32_t v, uint32_t base, int width, char pad)
     }
 }
 
+/* P2-8：两核共享 UART。按行持跨核锁，避免 CPU1 的 "cpu1 online" 与
+ * CPU0 输出逐字节交错。同核递归（响应抽头里的调试行）只计深度不重复
+ * 加锁，防自锁；嵌套行仍由 netmcp 的 g_tap_busy 过滤。 */
+static pot_lock_t g_printf_lock;
+static volatile uint8_t g_printf_depth[POT_SMP_MAX_CPUS];
+
 void potato_printf(const char *fmt, ...)
 {
+    uint32_t cpu = pot_smp_cpu_id() & 1u;
+    int locked = 0;
+    uint32_t ps = 0;
+    if (g_printf_depth[cpu] == 0u) {
+        ps = pot_lock_acquire(&g_printf_lock);
+        locked = 1;
+    }
+    g_printf_depth[cpu]++;
+
     va_list ap;
-    /* v3 检查点调度下，切换只发生在 syscall（yield/sleep），printf 不会被
-       中途切走，无需关中断——且 INTLEVEL=15 期间挂起 tick 会触发 QEMU
-       活锁（M2 已知问题），坚决不在这里持有高 INTLEVEL */
     va_start(ap, fmt);
 
     for (; *fmt != '\0'; fmt++) {
@@ -127,15 +139,19 @@ void potato_printf(const char *fmt, ...)
             put_unsigned((uint32_t)(uintptr_t)va_arg(ap, void *), 16, 8, '0');
             break;
         case '\0':
-            va_end(ap);
-            return;
+            goto done;
         default:
             uart_putc('%');
             uart_putc(*fmt);
             break;
         }
     }
+done:
     va_end(ap);
+    g_printf_depth[cpu]--;
+    if (locked) {
+        pot_lock_release(&g_printf_lock, ps);
+    }
 }
 
 /* ---------- 串口命令循环 ---------- */
@@ -150,7 +166,7 @@ static void cmd_help(void)
               "  trace: [n]|jsonl [n]|imp [n]|stream on|off|pump|meta|health\r\n"
               "  health, obs [panic], inject <leak|hang|spin|off> [arg]\r\n"
               "  net [arp|link down|up|ip <a.b.c.d> [gw]], ping <a.b.c.d>\r\n"
-              "  netmcp [dump|test|port <p>|peer <a.b.c.d> <port>]\r\n"
+              "  netmcp [dump|test|port <p>|peer <a.b.c.d> <port>|rw on|off]\r\n"
               "  smp [stat|start|ipi <n>|spawn <cpu|any> <n>|work|preempt on|off|"
               "selftest]  (M9 双核)\r\n"
               "  MCP: lines starting with '{' are JSON-RPC\r\n");
@@ -212,6 +228,22 @@ static void cmd_smp(const char *arg)
         pot_smp_work_dump();
         return;
     }
+    if (strcmp(arg, "stress") == 0 || strcmp(arg, "stress stat") == 0) {
+        pot_smp_stress_dump();
+        return;
+    }
+    if (strcmp(arg, "stress on") == 0) {
+        int rc = pot_smp_stress_start();
+        potato_printf("[POTATO][SMP] stress start rc=%d\r\n", rc);
+        if (rc == 0) {
+            pot_smp_stress_dump();
+        }
+        return;
+    }
+    if (strcmp(arg, "stress off") == 0) {
+        pot_smp_stress_stop();
+        return;
+    }
     if (strcmp(arg, "preempt") == 0) {
         potato_printf("[POTATO][SMP] cpu1_preempt=%d (usage: smp preempt on|off)\r\n",
                       pot_smp_cpu1_preempt());
@@ -257,7 +289,7 @@ static void cmd_smp(const char *arg)
     }
     potato_printf("[POTATO][SMP] unknown smp sub: %s "
                   "(stat|start|ipi <n>|spawn <cpu|any> <n>|work|"
-                  "preempt on|off|selftest)\r\n", arg);
+                  "stress on|off|stat|preempt on|off|selftest)\r\n", arg);
 }
 
 static void cmd_info(void)
@@ -287,10 +319,11 @@ static void cmd_tasks(void)
     }
     potato_printf("[POTATO][TS] now=%u switches=%u bg_used=%u/%u "
                   "diag wake=%u prem=%u sw=%u idle=%u "
-                  "drop ready=%u sleep=%u reg=%u\r\n",
+                  "drop ready=%u sleep=%u reg=%u guard=%u\r\n",
                   pot_sched_now(), pot_sched_total_switches(),
                   pot_sched_bg_used(), (unsigned)POT_SCHED_BG_BUDGET,
-                  d[0], d[1], d[2], d[3], rdrop, sdrop, regdrop);
+                  d[0], d[1], d[2], d[3], rdrop, sdrop, regdrop,
+                  pot_task_stack_guard_faults());
 }
 
 static void cmd_taskdemo(const char *arg)
@@ -947,7 +980,7 @@ static void cmd_ping(const char *arg)
 
 static void cmd_netmcp(const char *arg)
 {
-    /* netmcp | netmcp dump | netmcp port <p> | netmcp peer <ip> <port> | test */
+    /* netmcp | dump | port <p> | peer <ip> <port> | rw on|off | test */
     char sub[10];
     const char *rest = split_word(arg, sub, (int)sizeof(sub));
 
@@ -958,6 +991,20 @@ static void cmd_netmcp(const char *arg)
     if (strcmp(sub, "test") == 0) {
         int r = netmcp_selftest();
         potato_printf("[POTATO][NETMCP] selftest %s\r\n", r == 0 ? "ok" : "FAIL");
+        return;
+    }
+    if (strcmp(sub, "rw") == 0) {
+        char w[8];
+        split_word(rest, w, (int)sizeof(w));
+        if (strcmp(w, "on") == 0) {
+            netmcp_set_remote_write(1);
+        } else if (strcmp(w, "off") == 0) {
+            netmcp_set_remote_write(0);
+        } else {
+            potato_printf("[POTATO][NETMCP] remote write=%d "
+                          "(usage: netmcp rw on|off)\r\n",
+                          netmcp_remote_write());
+        }
         return;
     }
     if (strcmp(sub, "port") == 0) {
@@ -981,7 +1028,7 @@ static void cmd_netmcp(const char *arg)
         return;
     }
     uart_puts("[POTATO][NETMCP] usage: netmcp [dump|test|port <p>|"
-              "peer <a.b.c.d> <port>]\r\n");
+              "peer <a.b.c.d> <port>|rw on|off]\r\n");
 }
 
 static void cmd_dispatch(char *line)

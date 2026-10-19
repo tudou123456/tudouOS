@@ -11,12 +11,12 @@ QMP 测试台自动验收；`--platform hw` 产出全 RAM 单镜像，已用 esp
 > `docs/serial-mcp.md`）、M8 可观测体系（JSONL 导出/健康快照/注入/
 > `tools/ai_analysis.py`，`docs/observability.md`）、M9 双核 SMP（CPU1
 > 启动/核间中断/负载均衡，`docs/smp.md`）。
-> QEMU 测试台 **67 用例全绿**（M1~M9 + 缺陷修复回归）。
+> QEMU 测试台 **69 用例全绿**（M1~M9 + 缺陷修复回归；发布门禁要求连续两轮）。
 > 真机带板验证已完成（2026-10-17：RAM-only 布局稳定启动、CPU1 上线、
 > IPI/绑核/负载均衡实测通过，`docs/hardware-bringup.md`）。
-> **真机 M1–M9 全量回归（2026-10-19）**：串口自动回归台
-> `test/hw_runner.py`（72 用例，`test/hw_cases/`）在普通 ESP32-S3 开发板上
-> **70 PASS / 0 FAIL / 2 显式 SKIP**；真机远程 MCP 走串口帧传输
+> **真机 M1–M9 全量回归（2026-10-19 审计修复后）**：串口自动回归台
+> `test/hw_runner.py`（74 用例，`test/hw_cases/`）在普通 ESP32-S3 开发板上
+> **72 PASS / 0 FAIL / 2 显式 SKIP**；真机远程 MCP 走串口帧传输
 > （`tools/serial_mcp.py` + `docs/serial-mcp.md`）。报告见
 > [test/logs/hw/summary.md](test/logs/hw/summary.md)。
 > QEMU 构建走 flash XIP 执行；真机构建默认全 RAM（代码 IRAM、只读数据 DRAM）；
@@ -64,7 +64,8 @@ python -m pip install esptool  # 缺 esptool 时
 python tools/build.py                # QEMU 镜像：编译内核 → ESP 镜像 → 4MB flash 镜像
 python tools/build.py --platform hw  # 真机镜像：全 RAM 单镜像 potato_boot_hw.bin
 python qemu/run_qemu.py              # 交互运行（串口直连终端，可敲 ping/info/echo）
-python -m test.runner                # QMP 自动验收（67 个用例 + 日志落盘）
+python -m test.runner                # QMP 自动验收（69 个用例 + 日志落盘）
+py -3.14 tools/release_gate.py       # 发布门禁：干净构建 + QEMU 连续两轮全绿
 ```
 
 ## 构建真机镜像 / 烧录（ESP32-S3 开发板）
@@ -78,7 +79,7 @@ esptool --chip esp32s3 --port COMx --baud 921600 \
     write-flash 0x0 build/potato_boot_hw.bin
 ```
 
-- 只需烧 **一段**（`0x0`，S3 二级引导偏移），约 82KB；构建结束会打印地址与大小。
+- 只需烧 **一段**（`0x0`，S3 二级引导偏移），约 89KB；构建结束会打印地址与大小。
 - 串口 115200-8N1；启动后应看到 `banner v0.7.0` 和 `[POTATO] READY`。
 - 调试启动阶段可在构建时加 `TUDOU_BOOT_TRACE=1`（串口打阶段字符
   `S/T/U/W/C/D/V` 与 `0..E`）；改该变量后需 `--clean`。
@@ -92,12 +93,13 @@ esptool --chip esp32s3 --port COMx --baud 921600 \
   `py -3.14 tools/serial_mcp.py --port COM3 selftest` 做握手 + `tools/list` 自检；
   真机以太网需外挂 SPI 模块（W5500/DM9051 类），尚未实现/到货。
 
-## 测试用例（QEMU 67 个全绿 + 真机 72 条串口回归）
+## 测试用例（QEMU 69 个全绿 + 真机 74 条串口回归）
 
-下表为 M1~M6 核心用例（QEMU）；M7/M8/M9 用例（19 个）见各自文档与
-`test/cases/test_m7*.py`、`test_m8*.py`、`test_m9*.py`、`test_build_hw_platform.py`。
+下表为 M1~M6 核心用例（QEMU）；M7/M8/M9 用例见各自文档与
+`test/cases/test_m7.py`、`test/cases/test_m7_nodev.py`、`test/cases/test_m9.py`、
+`test/cases/test_obs.py`（M8）、`test/cases/test_build_hw.py`。
 
-**真机串口回归台**（`test/hw_runner.py` + `test/hw_cases/`，72 条，M1–M9 全覆盖）：
+**真机串口回归台**（`test/hw_runner.py` + `test/hw_cases/`，74 条，M1–M9 全覆盖）：
 
 ```powershell
 py -3.14 -m test.hw_runner --port COM3 --list        # 列出用例
@@ -105,7 +107,7 @@ py -3.14 -m test.hw_runner --port COM3 --smoke       # 9 条冒烟
 py -3.14 -m test.hw_runner --port COM3 --keep-going  # 全量回归
 ```
 
-2026-10-19 验收结果 **70 PASS / 0 FAIL / 2 显式 SKIP**（QMP 断线冻结、QEMU XIP
+2026-10-19 审计修复后验收结果 **72 PASS / 0 FAIL / 2 显式 SKIP**（QMP 断线冻结、QEMU XIP
 布局差异，均有替代覆盖），报告见 [test/logs/hw/summary.md](test/logs/hw/summary.md)。
 
 | 用例 | 验证 |
@@ -114,7 +116,7 @@ py -3.14 -m test.hw_runner --port COM3 --keep-going  # 全量回归
 | test_ping_pong | 串口命令交互（ping→pong、echo、info） |
 | test_qmp_reset | QMP 复位后完整重启、RESET 事件、复位后功能正常 |
 | test_qmp_stop_cont | QMP 冻结 CPU 期间串口静默，恢复后补处理命令 |
-| test_tick_alive | 1kHz tick 与真实时间对齐（±20%） |
+| test_tick_alive | tick 计数与 ccount 频率假设自洽（真机另由 systimer 标定 `cpu_hz`，见 `tickstat`） |
 | test_uart_rx_irq | UART RX 中断 + 环形缓冲连收 20 行不丢 |
 | test_exception_dump | 非法指令异常现场 dump，QMP 复位后完整恢复 |
 | test_trace_dump | 追踪环事件序号递增、时间戳单调 |
@@ -166,10 +168,10 @@ exhaust|churn|off`（分配回归/碎片合并/越界注入/耗尽恢复/soak �
 **文件系统/MCP 命令**（M6）：`fs ls|write <n> <t>|cat <n>|rm <n>|mkfs|df`
 （potfs 操作）、`mcp on|off`（MCP 代理生命周期）；**以 `{` 开头的输入行
 自动作为 JSON-RPC 请求**投递消息基座处理并返回 JSON 响应——外部 Agent
-（如测试台/AI）经 UART 即可调用 7 个内核工具。
+（如测试台/AI）经 UART 即可调用 6 个内核工具。
 
 **网络命令**（M7）：`net [arp|link down|up|ip <a.b.c.d> [gw]]`、
-`ping <a.b.c.d>`（ICMP echo）、`netmcp [dump|test|port <p>|peer <a.b.c.d> <port>]`
+`ping <a.b.c.d>`（ICMP echo）、`netmcp [dump|test|port <p>|peer <a.b.c.d> <port>|rw on|off]`
 （UDP 远程 MCP 通道：纪元/序号/回执/去重/重同步）。注意以太网侧仅在 **QEMU
 open_eth** 下有效（S3 真机无内部 EMAC）；真机远程 MCP 走串口传输，见
 [docs/serial-mcp.md](docs/serial-mcp.md)，以太网细节与限制见
@@ -180,8 +182,28 @@ open_eth** 下有效（S3 真机无内部 EMAC）；真机远程 MCP 走串口�
 （注入锚点 + AI 分析器 `tools/ai_analysis.py`，详见
 [docs/observability.md](docs/observability.md)）。
 
-**双核命令**（M9）：`smp [stat|start|ipi <n>|spawn <cpu|any> <n>|work|preempt on|off|selftest]`
-（默认单核，`smp start` 拉起 CPU1；详见 [docs/smp.md](docs/smp.md)）。
+**双核命令**（M9）：`smp [stat|start|ipi <n>|spawn <cpu|any> <n>|work|stress on|off|stat|preempt on|off|selftest]`
+（默认单核，`smp start` 拉起 CPU1；`smp stress` 是双核 heap/potfs/消息并发压测；
+详见 [docs/smp.md](docs/smp.md)）。
+
+## 安全与信任边界（2026-10-19 审计修复）
+
+- **UDP 远程 MCP 只接受固定 peer**（`netmcp peer <ip> <port>`），源地址/端口
+  不匹配的报文直接丢弃（`netmcp dump` 的 `reject` 计数可见）；`ack` 必须与
+  当前纪元一致且不超过已发响应上界，任意主机无法伪造 ack 清空重放保护。
+- **远程写工具默认关闭**：UDP 通道默认只读，`netmcp rw on` 才允许 `fs.write`；
+  串口 MCP 是物理隔离的可信控制面，不受此限。UDP 通道仍应仅部署在可信直连
+  网段——本版本未实现共享密钥/HMAC 鉴权。
+- **跨核数据结构**（堆/potfs/消息环/追踪环/调度容器）使用 S32C1I 自旋锁；
+  `smp stress` 回归用例在双核上并发跑 5 万+ 次 heap/fs/msg 操作，内容损坏
+  计数必须为 0。
+- **发布门禁**：QEMU 全量 **连续两轮** 69/69 全绿 + 真机全量 72 PASS/0 FAIL/
+  2 SKIP；完整门禁证据（固件 SHA256、两轮 QEMU、真机原始日志与清单）见
+  [docs/release-gate-2026-10-19.md](docs/release-gate-2026-10-19.md)。测试用例
+  不再依赖"流量结束后立刻 dump"的时序（trace 断言改用 `trace meta` 累计计数
+  差分）。审计清单见
+  [docs/audit-report-2026-10-19.md](docs/audit-report-2026-10-19.md) 与
+  [docs/defect-report.md](docs/defect-report.md) 的 2026-10-19 修复批次。
 
 ## 常见问题
 

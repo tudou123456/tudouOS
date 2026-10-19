@@ -125,14 +125,14 @@ tudouOS 的差异化调度：
 | --- | --- | --- | --- |
 | M1 ✅ | 启动 + UART 控制台 + 测试台闭环 | 支柱2雏形 | 横幅/ping-pong/QMP 复位/停止恢复 4/4 通过 |
 | M2 ✅ | 中断与异常：VECBASE 向量表、UART RX 中断（level2 向量路径）、1kHz tick（核内 CCOMPARE0，level1 通用异常路径+RFE）、致命异常现场 dump、最小追踪环（IRQ/EXC 事件）。时钟双路线：QEMU Windows 用 ccount（TIMG 计数器在该构建上启用即崩，见 qemu-testing.md 已知问题），真机/WSL 可切 TIMG | 强化1（根基）、支柱3起步 | M1 4 用例 + tick 存活/RX 中断不丢/异常 dump+复位恢复/追踪 dump/抖动冒烟 共 9/9 |
-| M3 ✅ | RTOS 核心：任务模型（静态栈 TCB 注册表）、syscall 统一上下文切换（call0，88 字节帧）、**三分类调度**（AI通信/UI/后台 + 轮转 + 5tick 时间片 + 200ms 老化防饿死【同优先级老化者优先决胜】+ 后台 1000tick 窗口 700tick 预算限速）、任务 sleep/yield/exit、idle 空闲任务、SCHED_SWITCH 追踪事件、taskstat/taskdemo 观测命令。**v5（2026-10-16 缺陷修复）**：tick 改 int6 中断驱动（时间推进独立于检查点，v4"忙烧冻结时间基准"病理消除，抖动 11892µs→~2.7ms）；tick 抢占切换完整接线（IRQ 帧 + rfe，E-02 实证路线），QEMU 模型在 genex 上下文切走时随机丢 CCOMPARE（见已知问题表），QEMU 默认检查点切换（`preempt on|off`），真机默认应开 | 支柱4、强化1 | 缺陷修复后含"无检查点忙烧期间 tick 持续推进"等判别性用例（测试台合计 48/48 两连绿） |
+| M3 ✅ | RTOS 核心：任务模型（静态栈 TCB 注册表）、syscall 统一上下文切换（call0，88 字节帧）、**三分类调度**（AI通信/UI/后台 + 轮转 + 5tick 时间片 + 200ms 老化防饿死【同优先级老化者优先决胜】+ 后台 1000tick 窗口 700tick 预算限速）、任务 sleep/yield/exit、idle 空闲任务、SCHED_SWITCH 追踪事件、taskstat/taskdemo 观测命令。**v5（2026-10-16 缺陷修复）**：tick 改 int6 中断驱动（时间推进独立于检查点，v4"忙烧冻结时间基准"病理消除，抖动 11892µs→~2.7ms）；tick 抢占切换完整接线（IRQ 帧 + rfe，E-02 实证路线），QEMU 模型在 genex 上下文切走时随机丢 CCOMPARE（见已知问题表），QEMU 默认检查点切换（`preempt on|off`），**真机默认开（2026-10-19 P0-2 修复：syscall 恢复按 frame_kind 分派）** | 支柱4、强化1 | 缺陷修复后含"无检查点忙烧期间 tick 持续推进"等判别性用例（QEMU 69/69 两连绿） |
 | M3.5 ✅ | **内核消息基座**：有界通道（静态容量环形+满丢/阻塞策略）、消息 ID/seq/回执/超时、QoS0/1/2（重发指数退避+上限、去重窗口、回执窗口）、水位/丢弃/重发计数健康快照、MSG_ENQ/DEQ/DROP/RETRY/ACK 追踪事件、msgdemo 五模式压测（flood/ping/lazy/timeout/heal）。等待语义为切片睡眠轮询（QEMU 限制），阻塞原语 pot_sched_sleep_until/wake 已就位供真机阶段恢复事件驱动 | 支柱1、强化2 | 洪泛 12.5×容量不 OOM 且回收准确、QoS1 全程回执零丢失、延迟回执触发重发+去重恰一次投递、超时失败上报、QMP 冻结自愈无丢无重、消息事件可回放——共 6 用例 |
 | M4 ✅ | 轻量内存管理：TLSF 类分配器（15 桶分级空闲表+位图定位+首适配，大块分裂/邻块即时双向合并）、护栏（块尾 canary+回指，free 校验越界即捕获计数不崩溃）、度量（used/free/largest/最大水位/alloc/free/fail/fault，memstat 命令）、MEM_ALLOC/FREE/FAULT 追踪事件、memtest 五模式（selftest/holes/fault/exhaust/churn soak）。soak 场景 8s wall ≈ 27 万次随机分配/校验/释放零损坏零泄漏；48h 长测入口已备（churn+批量复位脚本） | 强化4、支柱3 | 6 用例：分配回归/碎片合并恢复/越界捕获存活/耗尽恢复/churn soak 零泄漏/追踪可回放 |
 | M5 ✅ | **自研二级映射引导 + flash XIP**：boot.S 在进入 C 前配置外部内存 MMU（表@0x600C5000，表项=物理页号|invalid|type）映射 flash 页到 0x42 窗口 + 使能 icache（ROM 无映射能力实测，IROM 段从引导 ELF 剥离、LMA 落 flash 0x10020，镜像经 objcopy+merge-bin 双段布局）；C 代码+只读数据全部 XIP（摆脱 RAM 容量限制，IRAM 仅剩向量+汇编 <1KB）；**PAL 成形**（pal.h 双后端接口：qemu/hw，时基模式/时钟查询，TUDOU_PLATFORM 编译期选择）；**驱动框架**（链接期 .pot_drivers 段收集 + 优先级排序初始化 + drivers 枚举，uart 首个注册） | 支柱2、强化3 | 5 用例：XIP 布局（irom@0x42 窗口/IRAM≤4KB）/ROM 仅搬 RAM 段/PAL 查询/驱动注册枚举/XIP 全子系统功能——共 31/31 |
 | M6 ✅ | **MCP 协议适配器**（支柱1 收官；D-20 对齐 2025-06-18 规范核心）：迷你 JSON 解析/序列化（递归下降+完整 \uXXXX/代理对转义+迭代化释放）、initialize/notifications/initialized 握手、tools/list 规范 schema、tools/call（content/isError 形态）、id 三态回显、notification 不回包；UART 行传输绑定（'{' 开头行→消息基座通道）、代理任务（AI 类）分发（-32700/-32601/-32602/-32600 错误路径，超长行显式报错）；工具含 truncated 语义；**potfs**（RAM 扁平命名 blob 表，写时复制，临界区保护）；**串口 Shell**。消息内联负载 256B | 支柱1、强化2 | 9 用例（含多请求/握手/unicode/行长回归）——测试台合计 48/48 两连绿 |
-| M7 ✅ | 以太网（QEMU）：open_eth 测试外设 ↔ 协议栈；远程 MCP 通道（UDP 信封：纪元/序号/回执/去重/重同步）、UART tap 调试通路、`tools/net_peer.py` 主机侧对端、`docs/ethernet.md`。**真机 S3 无内部 EMAC**（硅片事实，旧 DW GMAC/外部 PHY 规划已推翻）；真机远程 MCP 走串口传输（[serial-mcp.md](serial-mcp.md)） | 支柱1/2 | ARP 应答、ping 回环、UDP 远程 MCP initialize/tools/list/去重/断线重连纪元重同步——6 用例（QEMU 6/6；nodev 无 EMAC 降级）；真机串口 MCP 与 M1–M9 命令面由真机串口回归台验收（70 PASS/0 FAIL/2 显式 SKIP，见 [test/logs/hw/summary.md](../test/logs/hw/summary.md)） |
+| M7 ✅ | 以太网（QEMU）：open_eth 测试外设 ↔ 协议栈；远程 MCP 通道（UDP 信封：纪元/序号/回执/去重/重同步）、UART tap 调试通路、`tools/net_peer.py` 主机侧对端、`docs/ethernet.md`。**真机 S3 无内部 EMAC**（硅片事实，旧 DW GMAC/外部 PHY 规划已推翻）；真机远程 MCP 走串口传输（[serial-mcp.md](serial-mcp.md)） | 支柱1/2 | ARP 应答、ping 回环、UDP 远程 MCP initialize/tools/list/去重/断线重连纪元重同步——6 用例（QEMU 6/6；nodev 无 EMAC 降级）；真机串口 MCP 与 M1–M9 命令面由真机串口回归台验收（72 PASS/0 FAIL/2 显式 SKIP，见 [test/logs/hw/summary.md](../test/logs/hw/summary.md)） |
 | M8 ✅ | 可观测体系完整化：JSONL 导出（主环 256+/重要副环 64+/健康快照/流式泵）、注入（leak/hang/spin）、`tools/ai_analysis.py` 规则分析器（12 条规则）、`docs/observability.md`；D-08：tick 补账丢失导致时基/调度冻结（health `irq.sched_lag` 可观测，已修） | 支柱3、强化5 | 注入泄漏/卡死场景由 AI/脚本从导出日志定位根因——6 用例（含时基无漂移判别用例） |
-| M9 ✅ | SMP：CPU1 启动（ROM 桩 `0x600C0004` 写入口，QEMU/真机同协议）、核间中断（IPI + 中断矩阵分核路由）、每核就绪队列/当前任务/时间片（THREADPTR 核号、S32C1I 全局调度锁）、任务亲和与跨核唤醒/迁移、CPU0 每 4 tick 负载均衡（20ms 冷却防抖）、`docs/smp.md` | 强化1 | 默认单核不变量、ROM 握手、IPI 双向、绑核执行、负载均衡迁移、混合压测稳定——6 用例（QEMU 6/6；真机 SMP 已验证：CPU1 经 `SYSTEM_CORE_1_CONTROL_0` 释放后上线，IPI/tick/绑核/负载均衡带板实测通过，见 `docs/hardware-bringup.md`） |
+| M9 ✅ | SMP：CPU1 启动（ROM 桩 `0x600C0004` 写入口，QEMU/真机同协议）、核间中断（IPI + 中断矩阵分核路由）、每核就绪队列/当前任务/时间片（THREADPTR 核号、S32C1I 全局调度锁）、任务亲和与跨核唤醒/迁移、CPU0 每 4 tick 负载均衡（20ms 冷却防抖）、`docs/smp.md`。**2026-10-19 审计修复**：heap/potfs/消息环/追踪环改用跨核自旋锁（P0-3/P0-4），`smp stress` 双核并发压测（5 万+ 次操作零损坏） | 强化1 | 默认单核不变量、ROM 握手、IPI 双向、绑核执行、负载均衡迁移、混合压测稳定、跨核锁压测——7 用例（QEMU 7/7；真机 SMP 已验证：CPU1 经 `SYSTEM_CORE_1_CONTROL_0` 释放后上线，IPI/tick/绑核/负载均衡带板实测通过，见 `docs/hardware-bringup.md`） |
 
 **真机带板状态（2026-10-19 更新）：** 2026-10-17 起 hw 平台为**默认全 RAM 布局**
 （代码 IRAM、只读数据 DRAM，ROM 直接搬两段 RAM；`--xip` 仅保留 XIP 实验路径），
@@ -145,9 +145,9 @@ MCP 改走串口 MCP 传输（[serial-mcp.md](serial-mcp.md)）；ARP/ping/UDP �
 仅在 QEMU 验证，真机以太网需外挂 SPI 模块（W5500/DM9051 类，未实现/未到货）。
 详见 [docs/hardware-bringup.md](hardware-bringup.md)。
 
-**真机 M1–M9 全量回归（2026-10-19 晚）：** 串口自动回归台
-（`test/hw_runner.py` + `test/hw_cases/`，72 用例）在普通 ESP32-S3 开发板上
-跑通全部里程碑：**70 PASS / 0 FAIL / 0 TIMEOUT / 2 显式 SKIP**（QMP 断线冻结、
+**真机 M1–M9 全量回归（2026-10-19 审计修复后）：** 串口自动回归台
+（`test/hw_runner.py` + `test/hw_cases/`，74 用例）在普通 ESP32-S3 开发板上
+跑通全部里程碑：**72 PASS / 0 FAIL / 0 TIMEOUT / 2 显式 SKIP**（QMP 断线冻结、
 QEMU XIP 布局差异，均有替代覆盖）。报告与逐条日志见
 [test/logs/hw/summary.md](../test/logs/hw/summary.md)；串口 MCP 工具
 `tools/serial_mcp.py` 的 selftest/跨进程/重放/复位恢复/`--stdio` 桥均通过。

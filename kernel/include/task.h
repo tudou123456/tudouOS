@@ -24,10 +24,11 @@
  *   - 后台预算：滚动 1000 tick 窗口内后台最多消耗 700 tick（限速率，
  *     给系统留余量；老化提升优先于预算，防饿死）
  *
- * 上下文切换（call0 ABI，双帧制，帧布局见 switch.S）：
+ * 上下文切换（call0 ABI，统一帧制，帧布局见 switch.S）：
  *   - 阻塞/让出：调用帧（a0 槽续体，rfe 恢复：EPC1=a0 槽、SR194=常态 PS）
  *   - tick 抢占：IRQ 帧（+76/+80 = 硬件 EPC1/异常 PS，rfe 恢复）
- *   - frame_kind 标记恢复路径（0=调用帧 1=IRQ 帧），切换落帧时设置
+ *   - frame_kind 标记恢复路径（0=调用帧 1=IRQ 帧），切换落帧时设置；
+ *     syscall 切换挑中 IRQ 帧任务时必须走 pot_do_resume_irq（P0-2）
  */
 
 #define POT_TASK_NAME_MAX 12
@@ -103,7 +104,7 @@ int  pot_sched_ready_count(uint32_t cpu);      /* 目标核非 idle 就绪任务
 int  pot_sched_cpu_running_nonidle(uint32_t cpu); /* 目标核正跑非 idle 任务 */
 pot_task_t *pot_sched_take_ready(uint32_t cpu);
 pot_task_t *pot_sched_take_ready_movable(uint32_t cpu); /* 取走目标核最优就绪任务（迁移用） */
-void pot_sched_put_ready(uint32_t cpu, pot_task_t *t); /* 放到目标核就绪队列 */
+int  pot_sched_put_ready(uint32_t cpu, pot_task_t *t); /* 放到目标核就绪队列；-1=队列满 */
 void pot_sched_attach_cpu(uint32_t cpu, pot_task_t *tcb); /* 挂接目标核当前任务 */
 void pot_sched_cpu_tick_account(uint32_t cpu, uint32_t elapsed); /* 分核 tick 记账 */
 int  pot_sched_should_preempt_cpu(uint32_t cpu); /* 分核抢占决策（无全局开关门） */
@@ -139,10 +140,14 @@ uint32_t pot_task_reg_overflow(void); /* 注册表溢出计数（D-12，应为 0
 /* 就绪/睡眠表溢出计数（D-11，应为 0） */
 void pot_sched_drop_diag(uint32_t *ready_drop, uint32_t *sleep_drop);
 
-/* 栈水位：以 0xC0DEC0DE 花样填充，返回从未使用的连续字数 */
+/* 栈水位：以 0xC0DEC0DE 花样填充，返回从未使用的连续字数。
+ * P2-3：栈底另放哨兵，切换时校验（越界写穿栈底即被发现）。 */
 #define POT_STACK_PATTERN 0xC0DEC0DEu
+#define POT_STACK_GUARD   0x5A5A5A5Au
 void pot_task_stack_paint(uint32_t *stack, uint32_t words);
 uint32_t pot_task_stack_unused(const pot_task_t *t);
+uint32_t pot_task_stack_guard_faults(void); /* 哨兵被踩计数（应为 0） */
+void pot_task_stack_guard_check(pot_task_t *t); /* 切换路径调用 */
 
 const char *pot_class_name(pot_task_class_t c);
 

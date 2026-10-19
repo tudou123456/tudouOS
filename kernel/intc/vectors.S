@@ -106,16 +106,16 @@ pot_vectors:
     rsr.epc1    a2
     s32i    a2, a1, 76
 #if TUDOU_PLATFORM == 0
-    rsr     a2, 194               /* 异常 PS 槽位（E-02 实证：rfe 从 SR194
-                                     * 恢复 PS；binutils 名 eps2，193 非有效
-                                     * SR，161 标准 EPS1 编号但不被 rfe 读） */
+    rsr     a2, 194               /* 异常 PS 槽位（E-02 实证：QEMU 的 rfe
+                                     * 从 SR194 恢复 PS；binutils 名 eps2） */
     s32i    a2, a1, 80
 #else
-    /* 真机：EPS1 真实编号未定（本 binutils 配置 176=configid0、194=eps2、
-     * 无 eps1 名）。两候选都入帧：80←SR176（标准 EPS1 首选），84←SR194。
-     * intc_l1_dispatch 的首 tick 探针打印二者实测值定案；preempt 默认关，
-     * 帧槽 80 的回写路径（pot_do_resume_irq）在此之前不会运行。 */
-    rsr     a2, 176
+    /* P2-1 定论：Xtensa level-1 异常不把 PS 存进任何可写 SR——SR 表里
+     * 只有 EPS2..EPS7（194..199），没有 EPS1；SR176 是只读 CONFIGID0。
+     * 硬件只置 PS.INTLEVEL=1/EXCM=1，UM/CALLINC 等原样保留，rfe 时
+     * 清回 INTLEVEL/EXCM 即可。因此 +80 槽在真机无硬件语义，置 0 留档；
+     * +84 存 SR194（EPS2）仅为与 QEMU 模型路径保持同一帧布局。 */
+    movi    a2, 0
     s32i    a2, a1, 80
     rsr     a2, 194
     s32i    a2, a1, 84

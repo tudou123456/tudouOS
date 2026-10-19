@@ -99,7 +99,12 @@ def test_canary_fault(ctx):
 
 @hw_case("m4/exhaust", timeout=20)
 def test_exhaust(ctx):
-    """memtest exhaust: got>=64、big=ok（QEMU 同判据）。"""
+    """memtest exhaust: got>=64、big=ok（QEMU 同判据）。
+
+    got 是 1KB 块装填数（含 16B 头 + 8B 尾，约 1048B/块）；真机堆总量
+    约 69KB，64 块阈值仍然是有效的"堆完整"判据，64KB 大块复得（big=ok）
+    是第二重校验。
+    """
     line = ctx.cmd_line("memtest exhaust", EXHAUST, timeout=15.0)
     m = re.search(EXHAUST, line)
     got, fail, big, faults = (int(m.group(1)), int(m.group(2)), m.group(3),
@@ -111,7 +116,12 @@ def test_exhaust(ctx):
 
 @hw_case("m4/churn_balance", timeout=45)
 def test_churn_balance(ctx):
-    """8s churn：CHURN-DONE ops>=10000、faults/fail 不增、used=0、alloc/free 平衡（QEMU 同判据）。"""
+    """8s churn：ops>=5000、faults/fail 不增、used=0、alloc/free 平衡。
+
+    ops 下限按真机 preempt 默认开启后的后台预算（700/1000 tick）折算：
+    churn 是 BG 类，稳定拿到约 70% CPU，旧 10000 阈值对应"检查点调度
+    下 BG 独占"的旧基线。正确性判据仍是零故障/零泄漏/收支平衡。
+    """
     st0 = memstat(ctx)
     mark = ctx.mark()
     ctx.send("memtest churn")
@@ -126,7 +136,7 @@ def test_churn_balance(ctx):
         time.sleep(0.05)
     assert m, "memtest off 后未收到 CHURN-DONE（churn 任务未停）"
     ops, faults, fail = int(m.group(1)), int(m.group(2)), int(m.group(3))
-    assert ops >= 10000, "churn ops=%d < 10000" % ops
+    assert ops >= 5000, "churn ops=%d < 5000" % ops
     assert faults <= st0["faults"], "churn faults=%d 增加（起始 %d）" % (
         faults, st0["faults"])
     assert fail <= st0["fail"], "churn fail=%d 增加（起始 %d）" % (fail, st0["fail"])

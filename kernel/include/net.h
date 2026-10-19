@@ -98,7 +98,11 @@ uint32_t netmcp_cursor(void);         /* 已处理请求序号游标 */
 int  netmcp_peer_known(void);
 uint32_t netmcp_stat(int which);      /* 0rx 1tx 2req 3dup 4replay 5resync
                                        * 6hello 7bad 8gaps 9ack 10txseq
-                                       * 11pending 12trunc */
+                                       * 11pending 12trunc 13reject */
+
+/* P1-6：UDP 远程写工具授权（默认关闭；串口传输不受此限制） */
+void netmcp_set_remote_write(int on);
+int  netmcp_remote_write(void);
 
 /* ---- 串口 MCP 传输（真机：无 EMAC 时由 net_start 启用） ----
  * 帧：host→device = 0x02 "@@MCP <crc16> <json>\r\n"

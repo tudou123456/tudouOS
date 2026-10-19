@@ -116,7 +116,7 @@ static int slot_of(const pot_task_t *t)
     return (t->cls == POTCLS_IDLE) ? POTCLS_IDLE : (int)t->cls;
 }
 
-static void enqueue_ready(uint32_t cpu, pot_task_t *t)
+static int enqueue_ready(uint32_t cpu, pot_task_t *t)
 {
     int c = slot_of(t);
     if (g_ready_n[cpu][c] >= SLOTS) {
@@ -124,15 +124,16 @@ static void enqueue_ready(uint32_t cpu, pot_task_t *t)
         if (cpu == 0u) {
             trace_push(TR_SCHED_DROP, (uint32_t)t, (uint32_t)c);
         }
-        return;
+        return -1; /* P1-3：调用方必须回滚任务状态，不得让任务凭空消失 */
     }
     for (volatile int i = 0; i < g_ready_n[cpu][c]; i++) {
         if (g_ready[cpu][c][i] == t) {
-            return; /* 已在表（防御） */
+            return 0; /* 已在表（防御） */
         }
     }
     g_ready[cpu][c][g_ready_n[cpu][c]] = t;
     g_ready_n[cpu][c]++;
+    return 0;
 }
 
 static void dequeue_ready(uint32_t cpu, pot_task_t *t)
@@ -157,20 +158,21 @@ static void sleep_remove_at(int i)
     g_sleep_n--;
 }
 
-static void sleep_add(pot_task_t *t)
+static int sleep_add(pot_task_t *t)
 {
     if (g_sleep_n >= SLOTS) {
         g_diag_sleep_drop++; /* D-11：计数暴露 */
         trace_push(TR_SCHED_DROP, (uint32_t)t, 0x10u);
-        return;
+        return -1;
     }
     for (volatile int i = 0; i < g_sleep_n; i++) {
         if (g_sleep[i] == t) {
-            return;
+            return 0;
         }
     }
     g_sleep[g_sleep_n] = t;
     g_sleep_n++;
+    return 0;
 }
 
 /* ---------- 优先级与挑选（调用方持锁或只读快照） ---------- */
@@ -223,11 +225,13 @@ static pot_task_t *pick_best(uint32_t cpu)
 
 /* ---------- 统一切换核心：仅在异常上下文调用 ---------- */
 
-void pot_do_resume(pot_task_t *t); /* switch.S */
+void pot_do_resume(pot_task_t *t);     /* switch.S：syscall/首启帧 */
+void pot_do_resume_irq(pot_task_t *t); /* switch.S：IRQ 帧（P0-2） */
 
 static void switch_account(pot_task_t *from, pot_task_t *next)
 {
     uint32_t me = cpu_id();
+    pot_task_stack_guard_check(from); /* P2-3：每次离开任务时校验栈底哨兵 */
     g_total_switches++;
     g_switches[me]++;
     g_diag_switch++;
@@ -255,33 +259,45 @@ void pot_sched_switch_from_exception(void *frame_base, uint32_t magic,
         return; /* 防御：未挂接 CPU（不应发生） */
     }
     from->sp = (uint32_t *)frame_base;
-    from->frame_kind = POT_FRAME_CALL; /* syscall 帧：a0 槽续体，ret.n 恢复 */
+    from->frame_kind = POT_FRAME_CALL; /* syscall 帧：a0 槽续体，rfe 恢复 */
 
     uint32_t ps = pot_smp_sched_lock();
     if (magic == MAGIC_SLEEP) {
         from->sleep_until = until;
         from->state = POTTASK_SLEEPING;
-        sleep_add(from);
+        if (sleep_add(from) != 0) {
+            /* P1-3：睡眠表满——任务留在运行态，不得成为永不唤醒的幽灵 */
+            from->state = POTTASK_RUNNING;
+            pot_smp_sched_unlock(ps);
+            return;
+        }
     } else if (magic == MAGIC_EXIT) {
         from->state = POTTASK_DEAD;
     } else { /* YIELD / PREEMPT */
         from->state = POTTASK_READY;
-        enqueue_ready(me, from);
+        if (enqueue_ready(me, from) != 0) {
+            /* P1-3：就绪表满——让出失败，继续运行（调用方 syscall 正常返回） */
+            from->state = POTTASK_RUNNING;
+            pot_smp_sched_unlock(ps);
+            return;
+        }
     }
 
     pot_task_t *next = pick_best(me);
     if (next == 0) {
-        next = from; /* idle 兜底，防御 */
+        /* idle 兜底：EXIT 时绝不能把 DEAD 任务当 next 恢复 */
+        next = (magic == MAGIC_EXIT) ? &g_idle_tcb : from;
     }
     dequeue_ready(me, next);
     switch_account(from, next);
     pot_smp_sched_unlock(ps);
-    pot_do_resume(next); /* 不返回 */
+    if (next->frame_kind == POT_FRAME_IRQ) {
+        pot_do_resume_irq(next); /* P0-2：被 tick 抢占过的任务必须走 IRQ 恢复 */
+    }
+    pot_do_resume(next); /* 首启/syscall 帧：rfe 恢复（不返回） */
 }
 
 /* ---------- D-03 v5：tick 抢占（IRQ 帧 + rfe，E-02 实证路线） ---------- */
-
-void pot_do_resume_irq(pot_task_t *t); /* switch.S */
 
 void pot_sched_preempt_from_irq_cpu(uint32_t cpu, void *frame_base)
 {
@@ -294,7 +310,12 @@ void pot_sched_preempt_from_irq_cpu(uint32_t cpu, void *frame_base)
 
     uint32_t ps = pot_smp_sched_lock();
     from->state = POTTASK_READY;
-    enqueue_ready(cpu, from);
+    if (enqueue_ready(cpu, from) != 0) {
+        /* P1-3：就绪表满——放弃本次抢占，保持运行态（IRQ 返回后继续执行） */
+        from->state = POTTASK_RUNNING;
+        pot_smp_sched_unlock(ps);
+        return;
+    }
     if (cpu == 0u) {
         g_diag_preempt++;
     }
@@ -365,7 +386,13 @@ int pot_sched_wake(pot_task_t *t)
             t->state = POTTASK_READY;
             dst = target_cpu_of(t);
             t->cpu = (volatile int)dst;
-            enqueue_ready(dst, t);
+            if (enqueue_ready(dst, t) != 0) {
+                /* P1-3：目标队列满——退回睡眠，下个 tick 再试（不得丢任务） */
+                t->state = POTTASK_SLEEPING;
+                sleep_add(t);
+                pot_smp_sched_unlock(ps);
+                return 0;
+            }
             pot_smp_sched_unlock(ps);
             if (dst != me) {
                 pot_smp_ipi_send(dst, POT_IPI_WAKE);
@@ -390,7 +417,10 @@ void pot_sched_cpu_tick_account(uint32_t cpu, uint32_t elapsed)
     if (c != 0) {
         c->cpu_ticks += elapsed;
         if (c->cls == POTCLS_BACKGROUND) {
+            /* P2-7：CPU0/CPU1 tick 并发 RMW——复合读改写必须串行化 */
+            uint32_t ps = pot_smp_sched_lock();
             g_bg_used += elapsed;
+            pot_smp_sched_unlock(ps);
         }
     }
     if (g_quantum[cpu] > elapsed) {
@@ -407,7 +437,9 @@ void pot_sched_tick(uint32_t elapsed)
 
     if ((g_now - g_win_start) >= POT_SCHED_WINDOW_TICKS) {
         g_win_start += POT_SCHED_WINDOW_TICKS;
+        uint32_t ps = pot_smp_sched_lock(); /* P2-7：两核都会累加 g_bg_used */
         g_bg_used = 0;
+        pot_smp_sched_unlock(ps);
     }
 
     pot_task_t *c = g_cur[0];
@@ -423,7 +455,13 @@ void pot_sched_tick(uint32_t elapsed)
             t->state = POTTASK_READY;
             uint32_t dst = target_cpu_of(t);
             t->cpu = (volatile int)dst;
-            enqueue_ready(dst, t);
+            if (enqueue_ready(dst, t) != 0) {
+                /* P1-3：队列满——留在睡眠表（把唤醒推迟 1 tick） */
+                t->state = POTTASK_SLEEPING;
+                t->sleep_until = g_now + 1u;
+                sleep_add(t);
+                continue;
+            }
             g_diag_wake++;
             if (dst != 0u) {
                 need_ipi = 1; /* 唤醒落在 CPU1：补 IPI 让它重调度 */
@@ -458,6 +496,10 @@ void pot_sched_tick(uint32_t elapsed)
 void pot_sched_init(void)
 {
     asm volatile("rsr.ps %0" : "=r"(pot_task_ps));
+    /* P2-6：sched_init 现在早于 intc_enable_interrupts（boot.S 仍处于
+     * INTLEVEL=15）。任务常态 PS 必须显式清掉 INTLEVEL[3:0] 与 EXCM，
+     * 否则 rfe 恢复后会永久屏蔽中断（真机实测：tick 停摆、老化失效）。 */
+    pot_task_ps &= ~0x1Fu;
     pot_task_ps_il1 = pot_task_ps | 1u; /* INTLEVEL=1：屏蔽 level-1 tick */
 
     g_cur[0] = &g_main_tcb;
@@ -474,6 +516,7 @@ void pot_sched_init(void)
         if (below > 16u) {
             pot_task_stack_paint(g_main_tcb.stk_lo, below - 16u);
         }
+        g_main_tcb.stk_lo[0] = POT_STACK_GUARD; /* P2-3 */
     }
     g_quantum[0] = POT_SCHED_QUANTUM_TICKS;
     g_need_sched = 0;
@@ -594,20 +637,24 @@ pot_task_t *pot_sched_take_ready_movable(uint32_t cpu)
     return t;
 }
 
-void pot_sched_put_ready(uint32_t cpu, pot_task_t *t)
+int pot_sched_put_ready(uint32_t cpu, pot_task_t *t)
 {
     if (t == 0 || cpu >= (uint32_t)POT_SMP_MAX_CPUS) {
-        return;
+        return -1;
     }
     uint32_t me = cpu_id();
     uint32_t ps = pot_smp_sched_lock();
     t->state = POTTASK_READY;
     t->cpu = (volatile int)cpu;
-    enqueue_ready(cpu, t);
+    if (enqueue_ready(cpu, t) != 0) {
+        pot_smp_sched_unlock(ps);
+        return -1;
+    }
     pot_smp_sched_unlock(ps);
     if (cpu != me) {
         pot_smp_ipi_send(cpu, POT_IPI_RESCHED);
     }
+    return 0;
 }
 
 void pot_sched_attach_cpu(uint32_t cpu, pot_task_t *tcb)
@@ -631,38 +678,46 @@ void pot_sched_attach_cpu(uint32_t cpu, pot_task_t *tcb)
  * 前缀逐行断言，故行组装期间（uart 行忙）推迟抢占到下一个 tick。 */
 /* D-03 诊断开关：0=禁用 tick 抢占切换（中断 tick 仍记账/唤醒，
  * 切换只发生在检查点）——`preempt off|on` 命令控制。
- * 默认 0：QEMU esp32s3 模型在"genex 上下文切走 + CCOMPARE 活动"组合下
+ * QEMU 默认 0：esp32s3 模型在"genex 上下文切走 + CCOMPARE 活动"组合下
  * 会随机丢 tick（M3 三版设计冻结的同源模型缺陷，E-02 已排除寄存器
- * 用法因素，看门狗只能救时钟救不了任务重复执行）；真机（TRM 一致）
- * 上应默认开启。M9：CPU1 tick 抢占另有 g_cpu1_preempt（smp.c） */
-static volatile int g_preempt_enabled = 0;
+ * 用法因素，看门狗只能救时钟救不了任务重复执行）；真机默认 1
+ * （TRM 一致，P0-2 修复后 syscall 恢复会按 frame_kind 分派）。
+ * M9：CPU1 tick 抢占另有 g_cpu1_preempt（smp.c）。 */
+static volatile int g_preempt_enabled = (TUDOU_PLATFORM != 0) ? 1 : 0;
 
 int pot_sched_should_preempt_cpu(uint32_t cpu)
 {
     if (cpu >= (uint32_t)POT_SMP_MAX_CPUS) {
         return 0;
     }
+    /* P1-4：就绪队列可能被对核并发修改——决策全程持调度锁（pick_best 和
+     * g_ready_n 读不能被 CMS 撕开）。本函数不调用带锁的 ready_count 辅助。 */
+    uint32_t ps = pot_smp_sched_lock();
     pot_task_t *c = g_cur[cpu];
+    int ready_n = g_ready_n[cpu][0] + g_ready_n[cpu][1] + g_ready_n[cpu][2];
+    int q = (int)g_quantum[cpu];
+    int mid = (cpu == 0u && uart_tx_midline());
+    int r = 0;
     if (c == 0) {
-        return 0;
+        r = 0;
+    } else if (c->cls == POTCLS_IDLE && ready_n == 0) {
+        r = 0; /* 无人就绪：连轮转都不需要 */
+    } else if (mid) {
+        r = 0; /* 行组装中：推迟（下一个 tick 再试，最多 ~1.4ms） */
+    } else {
+        pot_task_t *best = pick_best(cpu);
+        if (best == 0 && c->cls != POTCLS_IDLE) {
+            r = 0;
+        } else if (c->cls == POTCLS_IDLE) {
+            r = 1; /* idle 让路 */
+        } else if (q == 0) {
+            r = 1; /* 时间片耗尽且有任务等着：轮转/让位 */
+        } else {
+            r = (best != 0) && (eff_prio(best) < eff_prio(c));
+        }
     }
-    if (c->cls == POTCLS_IDLE && pot_sched_ready_count(cpu) == 0) {
-        return 0; /* 无人就绪：连轮转都不需要 */
-    }
-    if (cpu == 0u && uart_tx_midline()) {
-        return 0; /* 行组装中：推迟（下一个 tick 再试，最多 ~1.4ms） */
-    }
-    pot_task_t *best = pick_best(cpu);
-    if (best == 0 && c->cls != POTCLS_IDLE) {
-        return 0;
-    }
-    if (c->cls == POTCLS_IDLE) {
-        return 1; /* idle 让路 */
-    }
-    if (g_quantum[cpu] == 0u) {
-        return 1; /* 时间片耗尽且有任务等着：轮转/让位 */
-    }
-    return (best != 0) && (eff_prio(best) < eff_prio(c));
+    pot_smp_sched_unlock(ps);
+    return r;
 }
 
 int pot_sched_should_preempt(void)
@@ -676,7 +731,7 @@ int pot_sched_should_preempt(void)
 void pot_task_register(pot_task_t *t); /* task.c */
 
 /* task.c 创建任务时的入队口（M9：绑核任务直接进目标核队列并补 IPI） */
-void sched_static_enqueue(pot_task_t *t)
+int sched_static_enqueue(pot_task_t *t)
 {
     uint32_t me = cpu_id();
     uint32_t dst;
@@ -684,11 +739,15 @@ void sched_static_enqueue(pot_task_t *t)
     dst = (t->affinity >= 0) ? (uint32_t)t->affinity : me;
     t->state = POTTASK_READY;
     t->cpu = (volatile int)dst;
-    enqueue_ready(dst, t);
+    if (enqueue_ready(dst, t) != 0) {
+        pot_smp_sched_unlock(ps);
+        return -1; /* P1-3：创建失败必须上报，不得留下 READY 幽灵 */
+    }
     pot_smp_sched_unlock(ps);
     if (dst != me) {
         pot_smp_ipi_send(dst, POT_IPI_RESCHED);
     }
+    return 0;
 }
 
 /* 诊断计数导出（TODO(M3 debug): 稳定后移除） */
@@ -715,23 +774,4 @@ int pot_sched_preempt_enabled(void)
 void pot_sched_set_preempt(int on)
 {
     g_preempt_enabled = on;
-}
-
-/* M9：IPI/CPU1 tick 触发的"必要时重调度"入口。
- * CPU0 侧：只在 preempt on 时切换（保持单核默认行为，QEMU 模型缺陷规避）；
- * 关时仅置 need_sched 由检查点处理。CPU1 侧总是允许（该核只为 SMP 服务）。 */
-void pot_sched_resched_from_irq(void *frame_base)
-{
-    uint32_t me = cpu_id();
-    if (g_cur[me] == 0) {
-        return;
-    }
-    if (me == 0u && !g_preempt_enabled) {
-        g_need_sched = 1;
-        return;
-    }
-    if (!pot_sched_should_preempt_cpu(me)) {
-        return;
-    }
-    pot_sched_preempt_from_irq_cpu(me, frame_base);
 }

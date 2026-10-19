@@ -52,6 +52,29 @@ def test_mcp_on_ping(ctx):
     ctx.checks.append("mcp on + ping/echo/sysinfo ok（id 1/2/3 配对）")
 
 
+@hw_case("m6/string_id_echo", timeout=20)
+def test_string_id_echo(ctx):
+    """P0-1 真机回归：字符串 id（含长 id/转义 id）在响应中原样回显。"""
+    _mcp_on(ctx)
+    ctx.send(_line({"jsonrpc": "2.0", "id": "sid", "method": "ping"}))
+    line = ctx.wait_line(r'\{"jsonrpc":"2\.0","id":"sid","result":', 10.0)
+    assert '"pong":true' in line, "字符串 id 响应异常: %r" % line
+
+    long_id = "L" * 60
+    ctx.send(_line({"jsonrpc": "2.0", "id": long_id, "method": "tools/list"}))
+    line = ctx.wait_line(r'"id":"%s","result":' % long_id, 10.0)
+    assert '"tools"' in line, "长字符串 id 响应异常: %r" % line
+
+    ctx.send('{"jsonrpc":"2.0","id":"a\\"b\\\\c","method":"ping"}')
+    ctx.expect(r'\{"jsonrpc":"2\.0","id":"a\\"b\\\\c","result":', 10.0)
+
+    too_long = "T" * 65
+    ctx.send(_line({"jsonrpc": "2.0", "id": too_long, "method": "ping"}))
+    line = ctx.wait_line(r'"id":null,"error".*id too long', 10.0)
+    assert "-32600" in line, "超长 id 未显式拒绝: %r" % line
+    ctx.checks.append("字符串/长/转义 id 原样回显；>64B 显式拒绝")
+
+
 @hw_case("m6/rpc_errors", timeout=20)
 def test_rpc_errors(ctx):
     """错误路径：未知方法 -32601 / 非法 JSON -32700（QEMU 同锚点），之后仍能服务。"""

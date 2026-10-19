@@ -21,6 +21,7 @@
 
 #define T0_EN            (1u << 31)
 #define T0_INCREASE      (1u << 30)
+#define T0_UPDATE_BIT    (1u << 31) /* TIMG_T0UPDATE：写 bit31 触发锁存（P2-4） */
 #define T0_DIV_S         13u
 #define T0_DIV_VAL       79u /* 80MHz/(79+1) = 1MHz */
 
@@ -31,18 +32,18 @@ void time_source_init(void)
     mmio_write(T0_ALARM_HI, 0x7FFFFFFFu);
     mmio_write(T0_CONFIG, T0_EN | T0_INCREASE |
                  (T0_DIV_VAL << T0_DIV_S)); /* 不开 ALARM_EN */
-    mmio_write(T0_UPDATE, 0);
+    mmio_write(T0_UPDATE, T0_UPDATE_BIT);
 }
 
 uint32_t time_now_us(void)
 {
-    mmio_write(T0_UPDATE, 0); /* 锁存后读，保证一致 */
+    mmio_write(T0_UPDATE, T0_UPDATE_BIT); /* 锁存后读，保证一致 */
     return mmio_read(T0_LO);
 }
 
 uint32_t time_ticks_raw(void)
 {
-    mmio_write(T0_UPDATE, 0);
+    mmio_write(T0_UPDATE, T0_UPDATE_BIT);
     return mmio_read(T0_LO);
 }
 

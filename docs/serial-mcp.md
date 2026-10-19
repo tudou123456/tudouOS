@@ -242,25 +242,30 @@ hw-suite 全量回归报告了两个非阻塞 kernel 观察（K1 启动 tick 瞬
 ## 9. 真机全量回归（M1–M9）
 
 远程 MCP 是 M7 的一部分，但真机验收覆盖全部里程碑：
-`test/hw_cases/`（72 条用例）在 COM3 上跑 M1–M9 全部命令面与串口 MCP 通道。
+`test/hw_cases/`（74 条用例）在 COM3 上跑 M1–M9 全部命令面与串口 MCP 通道。
 结果与证据见 [test/logs/hw/summary.md](../test/logs/hw/summary.md)：
 
 ```powershell
-py -3.14 -m test.hw_runner --port COM3 --list        # 72 条用例
+py -3.14 -m test.hw_runner --port COM3 --list        # 74 条用例
 py -3.14 -m test.hw_runner --port COM3 --smoke       # 9 条冒烟
 py -3.14 -m test.hw_runner --port COM3 --keep-going  # 全量回归
 ```
 
-两轮固件实测均为 **70 PASS / 0 FAIL / 0 TIMEOUT / 2 显式 SKIP**
-（旧固件 `19:43:33` → `build/_hw_full2.log`；K1/K2 修复固件
-`20:21:35` → `build/_hw_full3.log`，smoke 9/9 `build/_hw_smoke3.log`）。
+**当前固件（2026-10-19 审计修复后）**：74 例 **72 PASS / 0 FAIL / 0 TIMEOUT /
+2 显式 SKIP**，exit 0（`build/_final_hw_run2.log`）；同一源码 QEMU 全量
+**69/69 两连绿**（`build/_gate_qemu_run1.log`、`build/_gate_qemu_run2.log`）。
+完整门禁证据（固件 SHA256 / 两轮 QEMU / 真机原始日志清单）见
+[release-gate-2026-10-19.md](release-gate-2026-10-19.md)。
+历史基线（审计前）：旧固件 `19:43:33` 与 K1/K2 修复固件 `20:21:35` 两轮均为
+**70 PASS / 0 FAIL / 2 SKIP**（`build/_hw_full2.log`、`build/_hw_full3.log`，
+smoke 9/9 `build/_hw_smoke3.log`）。
 2 条 SKIP 是平台手段差异、均有替代覆盖证据：
 (1) `m35/disconnect_heal` 需要 QMP 冻结 CPU，真机无 QMP；
 (2) `m5/xip` 为 QEMU flash 原地执行布局，真机为全 RAM 布局。
-`test/logs/hw/summary.md` 以新固件（20:21:35）为主体，旧固件基线保留为对照。
+`test/logs/hw/summary.md` 以 20:21:35 固件为主体，旧固件基线保留为对照。
 
-**Lead 最终验收复跑**（干净重建，固件 `20:29:27` / 85952 B / esptool Hash
-verified）：`tools/serial_mcp.py --reset selftest` PASS
+**Lead 最终验收复跑（审计前基线，固件 `20:29:27` / 85952 B / esptool Hash
+verified）**：`tools/serial_mcp.py --reset selftest` PASS
 （`build/_final_hw_selftest2.log`）→ 全量回归 **70 PASS / 0 FAIL / 0 TIMEOUT /
 2 SKIP**，exit 0（`build/_final_hw_runner4.log`）；同一源码 QEMU 全量
 **67/67**、exit 0（`build/_final_qemu_runner3.log`）。

@@ -85,7 +85,7 @@ UART 打印级延时 → call0 IROM 函数 → **执行成功打印 'X'** → �
 
 第一轮结论：0x42 flash XIP 取指不可用。第二阶段目标改为“不依赖 XIP 也能跑”：
 hw 平台**默认全 RAM 布局**，代码进 IRAM、只读数据进 DRAM，ROM 直接把两个 RAM 段
-加载好再跳入口；QEMU 仍走 XIP 不变（67 例回归不受影响）。
+加载好再跳入口；QEMU 仍走 XIP 不变（QEMU 69 例回归不受影响）。
 
 ### 1. 全 RAM 布局（`tools/build.py` + `kernel/linker/tudou.ld`）
 
@@ -171,11 +171,15 @@ stack=0x3fcc5d90-0x3fcc9d90 heap=0x3fcc9d90-0x3fcdc700`。
   - **K3 trace 环覆盖（设计观察，不修代码）**：1kHz tick 洪流使 256 项 trace 环
     覆盖约 128ms，`obs_health` 读活环非原子；回归台已改用 `trace meta`/`trace imp`
     计数增量做事件断言。若需长窗口事件回放，应降低 tick 事件入环频率或扩容。
-  - **极端并发限制**：UART 无硬行锁；`trace stream on` + 高频串口 MCP 长响应时
-    建议先 `trace stream off`（详见 [serial-mcp.md](serial-mcp.md) §7）。
-  - **真机串口自动回归台已完成**（`test/hw_runner.py` + `test/hw_cases/`，72 用例，
-    M1–M9 全量 70 PASS / 0 FAIL / 2 显式 SKIP，见
-    [test/logs/hw/summary.md](../test/logs/hw/summary.md)）；48h 长稳 soak 未跑。
+  - **极端并发限制**：`potato_printf` 已按行持跨核锁（P2-8），但 `uart_puts`
+    等原始输出入口仍需调用方保证不并发；`trace stream on` + 高频串口 MCP
+    长响应时建议先 `trace stream off`（详见 [serial-mcp.md](serial-mcp.md) §7）。
+  - **真机串口自动回归台已完成**（`test/hw_runner.py` + `test/hw_cases/`，74 用例，
+    M1–M9 全量 **72 PASS / 0 FAIL / 0 TIMEOUT / 2 显式 SKIP**，见
+    [test/logs/hw/summary.md](../test/logs/hw/summary.md) 与
+    `build/_final_hw_run2.log`）；48h 长稳 soak 未跑。
+  - **输出行锁（P2-8）**：`potato_printf` 已按行持跨核锁（同核递归按深度放行），
+    CPU1 上线后的 printf 不再与 CPU0 逐字节交错。
 
 ### 7. 最终带板验收（正式包，2026-10-17 21:2x）
 
@@ -196,14 +200,14 @@ stack=0x3fcc5d90-0x3fcc9d90 heap=0x3fcc9d90-0x3fcdc700`。
 - 平台：普通 ESP32-S3 开发板（无网口，CH340/COM3，115200）。ESP32-S3 硅片无
   内部以太网 MAC（[ethernet.md](ethernet.md) §8），远程 MCP 改走串口帧传输
   serial-json（[serial-mcp.md](serial-mcp.md)）。
-- 回归台：`test/hw_runner.py` + `test/hw_cases/`（72 条用例，M1–M9 分组；逐用例
+- 回归台：`test/hw_runner.py` + `test/hw_cases/`（74 条用例，M1–M9 分组；逐用例
   复位 + 等 READY；与 QEMU 台架并存、`test/cases/` 互不污染）：
   `py -3.14 -m test.hw_runner --port COM3 --keep-going`。
-- 结果：**PASS=70 / FAIL=0 / TIMEOUT=0 / SKIP=2（显式真机限制）**，退出码 0；
-  `--smoke` 9/9 PASS。报告与逐条日志：
-  [test/logs/hw/summary.md](../test/logs/hw/summary.md)。旧固件（`19:43:33`）与
-  K1/K2 修复固件（`20:21:35`）两轮均为此结果（`build/_hw_full2.log`、
-  `build/_hw_full3.log`）。
+- 结果（2026-10-19 审计修复后）：**PASS=72 / FAIL=0 / TIMEOUT=0 / SKIP=2
+  （显式真机限制）**，退出码 0；`--smoke` 9/9 PASS。报告与逐条日志：
+  [test/logs/hw/summary.md](../test/logs/hw/summary.md)、`build/_final_hw_run2.log`。
+  审计前基线为 70 PASS（旧固件 `19:43:33` / K1/K2 修复固件 `20:21:35`，
+  `build/_hw_full2.log`、`build/_hw_full3.log`），保留作对照。
 - 串口 MCP 验收：`py -3.14 tools/serial_mcp.py --port COM3 selftest` PASS
   （hello→tools/list 6 工具→ping→sysinfo→dump；rx_frames=4 bad_frames=0）；
   跨进程 fs 往返、同 seq 重放不重复执行、`--reset` 复位恢复、`--stdio` MCP
@@ -217,6 +221,13 @@ stack=0x3fcc5d90-0x3fcc9d90 heap=0x3fcc9d90-0x3fcdc700`。
   （`build/_final_hw_selftest2.log`）→ 全量回归 **70 PASS / 0 FAIL / 0 TIMEOUT /
   2 SKIP / 未执行 0，exit 0**（`build/_final_hw_runner4.log`）；同一源码 QEMU
   全量 **67/67**、exit 0（`build/_final_qemu_runner3.log`）。
+- **审计修复后最终验收（2026-10-19 22:31）**：`--platform hw --clean` 重建
+  （`potato_boot_hw.bin` 91376 B）→ `esptool write-flash 0x0` → Hash verified →
+  真机全量 **74 例 72 PASS / 0 FAIL / 0 TIMEOUT / 2 SKIP，exit 0**
+  （`build/_final_hw_run2.log`）；QEMU 全量 **69/69 两连绿**
+  （`build/_gate_qemu_run1.log`、`build/_gate_qemu_run2.log`）。完整门禁证据见
+  [release-gate-2026-10-19.md](release-gate-2026-10-19.md)（归档目录
+  `test/logs/gate-2026-10-19/`，含固件 SHA256 与日志清单）。
 - 顺带修复：`kernel/mcp/mcp.c::send_initialize()` 响应多一个 `}` 的既有 bug
   （initialize 响应原为非法 JSON；对 UDP/串口通道均生效）；`test_obs.py`
   `test_obs_panic_dump` 的半行快照 flake（分析器改喂最后一个完整行）。

@@ -68,9 +68,13 @@
 - `smp spawn 1 2`：绑核任务在 CPU1 运行（`cpu1 ... cur=smpw0`，计数增长）。
 - `smp spawn any 4`：`mig_in>0`，负载均衡迁移在真机实际发生。
 - 关闭 SWD 后连续运行 40s 无 rst:0x12 复位。
-- **中断帧 PS 槽在真机不同**：`vectors.S` 真机把 SR176 存帧 +80、SR194 存 +84；QEMU
-  只有 `+80 = SR194` 有效。因此 `pot_do_resume_irq` 真机读 `+84`、QEMU 读 `+80`。
-  CPU1 tick 抢占（`smp preempt on`）默认关，开启后才走该路径，需带板验证后再定默认定值。
+- **中断帧 PS 槽（P2-1 定论）**：Xtensa level-1 异常不把 PS 存进任何可写 SR——
+  SR 表只有 EPS2..EPS7（194..199），没有 EPS1；SR176 是只读 CONFIGID0。硬件只置
+  `PS.INTLEVEL=1/EXCM=1`，`UM/CALLINC` 等位原样保留，`rfe` 时清回即可。因此
+  `vectors.S` 真机把 +80 置 0（无硬件语义）、+84 存 SR194（EPS2，仅与 QEMU 模型
+  路径共用帧布局）；`pot_do_resume_irq` 真机读 +84、QEMU 读 +80。真机 `wsr 176`
+  被硬件忽略（只读寄存器）。CPU0 tick 抢占真机默认开（QEMU 默认关，模型缺陷规避），
+  CPU1 tick 抢占（`smp preempt on`）仍默认关、待专项验证。
 
 ## 3. 启动协议与 CPU1 主函数
 
@@ -87,9 +91,9 @@
 ```
 rsil a2, 15                     // 关中断，重建上下文
 movi a2, 1; wur a2, threadptr   // 核号=1
+movi a2, 0; wsr a2, windowbase  // P2-2：先归零窗口再写 a1
+movi a2, 1; wsr a2, windowstart
 movi a1, pot_cpu1_stack_top     // 本核 4KB 栈（.bss.cpu1_stack）
-movi a2, 1; wsr a2, windowstart // 窗口状态复位
-movi a2, 0; wsr a2, windowbase
 movi a2, pot_vectors; wsr.vecbase
 movi a2, pot_task_ps; l32i; movi a3, 15; or; wsr a2, ps
 call0 pot_smp_cpu1_main         // 不返回
@@ -123,7 +127,8 @@ call0 pot_smp_cpu1_main         // 不返回
 语义细节：
 
 - **置起**：发送方写自己的 `SYSTEM_CPU_INTR_FROM_CPU_n` 位 0；**清除**：接收方写发送方的寄存器 0。
-  源线保持到清除，所以 ISR 必须先清源再计数。
+  源线保持到清除，所以 ISR 必须先清源，再用 S32C1I 原子换出 `g_ipi_pending`（P1-5：
+  普通 "读→清零" 会吞掉 read/clear 之间新置的原因位）。
 - 原因位：`POT_IPI_RESCHED=0x1`、`POT_IPI_WAKE=0x2`、`POT_IPI_HALT=0x4`，位图在
   `g_ipi_pending[cpu]`；未定义原因计入 `ipi_unknown`。
 - `intc_irq_dispatch(level, frame_base)` 在 level2 按 pending&enable 分发 UART0(19)/EMAC(20)/IPI(21)；
@@ -142,19 +147,20 @@ Xtensa 硬件在 level-2 中断只保存 `EPC2/EPS2`；`SAVE_CALL0_REGS` 帧里 
 [POTATO][EXC] cause=28 epc=0x4200bef9 vaddr=0x69 ps=0x60532 task=idle
 ```
 
-触发路径：IPI ISR → `pot_sched_resched_from_irq` →
+触发路径（历史缺陷，已修复）：IPI ISR → level-2 帧直接切换 →
 `pot_do_resume_irq` → rfe 到 stale `EPC1`。`EXCCAUSE=28` 的标签口径尚待复核
 （`exception.c` 记 `INSTR_PIF_DATA_ERROR`；Xtensa ISA 的 28 为 `LoadProhibited`，
 两者在 E-03 的 MMU 实验里已有不一致记录）——但无论标签如何，机制结论一致：级别 2
-不能走级别 1 的 `rfe` 恢复路径。
+不能走级别 1 的 `rfe` 恢复路径。旧的 `pot_sched_resched_from_irq` 空壳已删除（P3）。
 
 结论与实现约束：
 
 - IPI ISR 只计数（`resched++`），不做调度。
 - 调度点：①CPU1 空闲循环轮询就绪队列；②任务检查点 `yield/sleep`；③CPU1 自有 level-1 tick
   抢占（`smp preempt on` 开启，默认 off）。
-- 抢占默认关闭的原因：QEMU 在 genex 帧与 CCOMPARE 递延模型下，level-1 tick 抢占路径的
-  帧完整性仍有已知不确定性；真机验证后再考虑默认开。
+- CPU1 tick 抢占默认关闭：QEMU 在 genex 帧与 CCOMPARE 递延模型下，level-1 tick 抢占路径的
+  帧完整性仍有已知不确定性；真机验证后再考虑默认开。CPU0 的 tick 抢占则按平台分叉：
+  QEMU 默认 off（同模型缺陷规避）、真机默认 on（P0-2 修复后 syscall 恢复按 frame_kind 分派）。
 
 ## 5. 调度器分核改造（`kernel/sched/sched.c`）
 
@@ -286,27 +292,31 @@ console_run()
 | `test_m9_work_pinned` | 绑核执行 | CPU1 `sw>before`、无迁移、两个任务计数 >0 |
 | `test_m9_balance` | 负载均衡 | `mig_in≥1`、`mig_out≥1`、CPU1 有切换、4 任务计数和 >0 |
 | `test_m9_stress_stability` | 混合压测稳定 | 两核在线、unk=0、`drop ready=0 sleep=0 reg=0`、tick 前进 |
+| `test_m9_xcore_locks_heap_fs_msg` | 跨核数据结构锁（P0-3/P0-4） | 两核并发 heap/fs/msg 各 5 万+ 次，`heap_bad/fs_bad/msg_bad` 全 0，堆故障计数不增 |
 
 运行：
 
 ```powershell
-python -m test.runner --filter m9      # 6/6
-python -m test.runner                  # 全量 67 例
+python -m test.runner --filter m9      # 7/7
+python -m test.runner                  # 全量 69 例
 ```
 
 ## 11. 限制与后续
 
-- **真机已验证（2026-10-17）**：CPU1 释放（`SYSTEM_CORE_1_CONTROL_0`）、入口跳转、
-  自有 tick、IPI 双向、绑核任务、负载均衡迁移均已带板实测通过；SWD 已关闭。
-  仍未覆盖：真机上的 CPU1 tick 抢占（默认关）、两核缓存/内存序压力（S3 无硬件一致性，
-  本实现靠锁）、`RTC_CNTL` 热复位后重新拉起 CPU1 的路径。
+- **真机已验证（2026-10-17 / 2026-10-19 审计修复后）**：CPU1 释放
+  （`SYSTEM_CORE_1_CONTROL_0`）、入口跳转、自有 tick、IPI 双向、绑核任务、负载均衡迁移
+  均已带板实测通过；SWD 已关闭。2026-10-19 起 heap/potfs/消息环/追踪环/调度容器全部
+  使用 S32C1I 跨核锁，`smp stress` + `test_m9_xcore_locks_heap_fs_msg` 在双核上并发
+  5 万+ 次操作零损坏。仍未覆盖：真机上的 CPU1 tick 抢占（默认关）、
+  `RTC_CNTL` 热复位后重新拉起 CPU1 的路径。
 - **真机外设**：ESP32-S3 硅片没有内部以太网 MAC，`emac_init` 在真机构建直接跳过
   （QEMU 的 open_eth 只是测试外设，见 [ethernet.md](ethernet.md) §8）；真机远程
   MCP 走串口传输（[serial-mcp.md](serial-mcp.md)）。UART0/EMAC 中断仍只在 CPU0
   路由，CPU1 不碰外设。
-- **抢占默认关**：当前以「空闲轮询 + 任务检查点 + 可选 tick 抢占」为主；真机验证后
-  再评估默认开启。
+- **CPU0 抢占按平台分叉**：QEMU 默认 off（模型缺陷规避）、真机默认 on；CPU1 tick
+  抢占仍默认 off（`smp preempt on` 可开）。
 - **trace 单写者**：CPU1 事件用计数替代；若需全事件追踪，需 per-CPU 环或 IPI 交接。
+  追踪环本身的并发写已由跨核自旋锁串行化（P1-2）。
 - **cause 28 标签口径**：`exception.c` 记 `INSTR_PIF_DATA_ERROR`，Xtensa ISA/QEMU 枚举
   有 `LoadProhibited` 说法，E-03 与 M9 两次观测现象一致但标签待真机/源码复核。
 - **锁统计**：暂未统计调度锁空转次数（后续加 `spin` 计数便于定位争用）。

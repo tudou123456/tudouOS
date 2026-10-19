@@ -21,7 +21,7 @@ from test.hw_util import (collect_tr, count, poll, poll_since, trace_meta,
 TS_TASK = (r"\[POTATO\]\[TS\] (\S+) cls=(\S+) st=(\d+) cpu=(\d+) sw=(\d+) "
            r"stk=(\d+)w")
 TS_SUM = (r"\[POTATO\]\[TS\] now=(\d+) switches=(\d+)[^\r\n]*"
-          r"drop ready=(\d+) sleep=(\d+) reg=(\d+)\r")
+          r"drop ready=(\d+) sleep=(\d+) reg=(\d+)(?: guard=\d+)?\r")
 TR_HEAD = r"\[POTATO\]\[TR\] total=(\d+) dropped=(\d+) last (\d+):\r"
 D_U = r"\[POTATO\]\[D\] U (\d+)\r"
 D_G = r"\[POTATO\]\[D\] G (\d+)\r"
@@ -93,20 +93,39 @@ def test_taskdemo_preempt(ctx):
 
 @hw_case("m3/taskdemo_stress", timeout=150)
 def test_taskdemo_stress(ctx):
-    """taskdemo stress：AI-DONE + A 行 >=200 + U/G 均出现（QEMU 同判据）。"""
+    """taskdemo stress：AI-DONE + A 行 >=200，且 AI 运行期间 UI/BG 都有 CPU 份额。
+
+    真机 preempt 默认开启后的语义（与 QEMU 检查点调度不同）：AI 类严格
+    高于 UI/BG，UI/BG 只在老化提升时拿到一个时间片（5ms/200ms）。因此
+    不能要求它们在 AI-DONE 前各完成一整拍（U/G 行），改用 tasks 的
+    cpu/sw 计数证明老化防饿死不失效——这才是该 demo 的不变量。
+    """
     mark = ctx.mark()
     ctx.send("taskdemo stress")
     ctx.expect(r"\[POTATO\]\[D\] demo stress started\r", 5.0)
+    # AI 运行中采样：三条 demo 任务都必须已被调度过（老化提升生效）
+    time.sleep(2.5)
+    ctx.send("tasks")
+    seen = {}
+    for _ in range(3):
+        m = ctx.expect(r"\[POTATO\]\[TS\] (dai|dui|dbg) cls=\S+ st=\d+ "
+                       r"cpu=(\d+) sw=(\d+)", 8.0)
+        seen[m.group(1)] = (int(m.group(2)), int(m.group(3)))
+    assert set(seen) == {"dai", "dui", "dbg"}, "tasks 缺 demo 任务: %r" % seen
+    assert seen["dai"][0] > 0, "AI 未获得 CPU: %r" % (seen,)
+    assert seen["dui"][1] > 0, "UI 在 AI 运行期间从未被调度（老化失效）: %r" % (seen,)
+    assert seen["dbg"][1] > 0, "BG 在 AI 运行期间从未被调度（老化失效）: %r" % (seen,)
+
     poll(ctx, "AI-DONE", lambda t: "AI-DONE" in t, timeout=120.0)
     text = ctx.text_since(mark)
     a_count = count(text, r"\[POTATO\]\[D\] A \d+\r")
     u_count = count(text, r"\[POTATO\]\[D\] U \d+\r")
     g_count = count(text, r"\[POTATO\]\[D\] G \d+\r")
     assert a_count >= 200, "A 行只有 %d 条（QEMU 判据 >=200）" % a_count
-    assert u_count >= 1 and g_count >= 1, \
-        "stress 缺 U/G 行 (U=%d G=%d)" % (u_count, g_count)
     ctx.cmd("taskdemo off", r"\[POTATO\]\[D\] demo stop-req\r", timeout=6.0)
-    ctx.checks.append("stress A=%d U=%d G=%d" % (a_count, u_count, g_count))
+    ctx.checks.append("stress A=%d U=%d G=%d；AI 运行期 cpu/sw dai=%r dui=%r dbg=%r"
+                      % (a_count, u_count, g_count, seen["dai"], seen["dui"],
+                         seen["dbg"]))
 
 
 @hw_case("m3/taskdemo_bg_budget", timeout=90)

@@ -4,6 +4,7 @@
 （该 QEMU 限制），虚拟时间膨胀下断言均用宿主时钟+宽容差。
 """
 
+import json
 import re
 import time
 
@@ -107,26 +108,28 @@ def test_msg_disconnect_heal(ctx):
 
 def test_msg_trace(ctx):
     """追踪环含 MSG_ENQ/MSG_DEQ/MSG_ACK 事件（消息流水可回放）。
-    流量刚结束须立刻 dump（256 项环会被切换事件刷掉）。"""
+
+    审计修复：256 深环在 1kHz tick 下只覆盖 ~128ms，且 trace dump 打印
+    期间环继续滑动——"流量结束后立刻 dump"是结构性 flaky。改用
+    `trace meta` 的累计 counts 做前后差值（真机侧 test_hw_m35 同判据）。"""
     ctx.serial.expect(READY_LINE, timeout=20)
+    ctx.serial.send("trace meta")
+    m = ctx.serial.expect(r"\[POTATO\]\[TRM\] (\{[^\r\n]*\})\r", timeout=10)
+    before = {c["ev"]: int(c["n"]) for c in json.loads(m.group(1)).get("counts", [])}
+
     ctx.serial.send("msgdemo ping 5")
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         if "PING-DONE" in ctx.serial.text and "RECV-DONE" in ctx.serial.text:
             break
         time.sleep(0.05)
-    ctx.serial.send("trace 200")
-    m = ctx.serial.expect(r"\[POTATO\]\[TR\] total=\d+ dropped=\d+ last (\d+):",
-                          timeout=5)
-    n_printed = int(m.group(1))
-    kinds = set()
-    for _ in range(n_printed):
-        try:
-            m2 = ctx.serial.expect(
-                r"\[POTATO\]\[TR\] #\d+ t=\d+ (MSG_ENQ|MSG_DEQ|MSG_DROP|MSG_RETRY|MSG_ACK|SCHED_SWITCH|IRQ_\w+)",
-                timeout=3)
-            if m2.group(1).startswith("MSG_"):
-                kinds.add(m2.group(1))
-        except Exception:
-            break
-    assert {"MSG_ENQ", "MSG_DEQ", "MSG_ACK"} <= kinds, f"消息事件缺失: {kinds}"
+    assert "RECV-DONE" in ctx.serial.text, "ping 5 未完成"
+
+    ctx.serial.send("trace meta")
+    m = ctx.serial.expect(r"\[POTATO\]\[TRM\] (\{[^\r\n]*\})\r", timeout=10)
+    after = {c["ev"]: int(c["n"]) for c in json.loads(m.group(1)).get("counts", [])}
+    delta = {k: after.get(k, 0) - before.get(k, 0)
+             for k in ("MSG_ENQ", "MSG_DEQ", "MSG_ACK")}
+    assert delta["MSG_ENQ"] >= 5, f"消息入队事件缺失: {delta}"
+    assert delta["MSG_DEQ"] >= 5, f"消息出队事件缺失: {delta}"
+    assert delta["MSG_ACK"] >= 5, f"消息回执事件缺失: {delta}"

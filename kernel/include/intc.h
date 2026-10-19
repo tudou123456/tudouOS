@@ -81,4 +81,22 @@ static inline void irq_restore(uint32_t ps)
                  :: "r"(ps) : "memory");
 }
 
+/* ---- 跨核互斥锁（M9/P0-3） ----
+ * rsil 15（本核全屏蔽）+ S32C1I 原子交换。heap/msg/potfs/trace 等
+ * "本核 rsil1 假锁"在 CPU1 上线后必须换成它：PS.INTLEVEL 是每核私有的，
+ * 两核可同时进入 rsil1 区间，复合容器更新会静默损坏。
+ *
+ * 约束：不可在 NMI 里使用；持锁期间不得睡眠；锁是全局地址，加锁顺序
+ * heap < trace、fs < heap（本仓库实际调用图只有这两种嵌套）。
+ * 每次加锁都重设 SCOMPARE1（每核私有），不依赖 smp_init 的初始化时序。 */
+typedef struct {
+    volatile uint32_t v;
+} pot_lock_t;
+
+uint32_t pot_lock_acquire(pot_lock_t *lock);
+void pot_lock_release(pot_lock_t *lock, uint32_t ps);
+
+/* 原子清零并返回旧值（IPI pending 等"读-清"不能丢并发置位） */
+uint32_t pot_atomic_swap_zero(volatile uint32_t *p);
+
 #endif /* TUDOU_INTC_H */

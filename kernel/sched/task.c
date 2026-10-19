@@ -5,6 +5,7 @@
 #include "task.h"
 #include "tick.h"
 #include "time.h"
+#include "trace.h"
 
 /*
  * 任务 API（M3，统一 IRQ 帧制）：
@@ -17,7 +18,7 @@ void pot_sched_syscall_yield(void);           /* switch.S */
 void pot_sched_syscall_sleep(uint32_t until); /* switch.S */
 void pot_sched_syscall_exit(void);            /* switch.S */
 void pot_task_register(pot_task_t *t);
-void sched_static_enqueue(pot_task_t *t);     /* sched.c */
+int sched_static_enqueue(pot_task_t *t);      /* sched.c：0=ok -1=队列满 */
 uint32_t pot_sched_now(void);
 
 extern uint32_t pot_task_ps; /* sched.c：任务常态 PS */
@@ -31,19 +32,25 @@ extern uint32_t pot_task_ps; /* sched.c：任务常态 PS */
 static pot_task_t *g_registry[REG_MAX];
 static int g_reg_n;
 static uint32_t g_reg_overflow; /* 登记溢出计数（tasks 命令可见，应为 0） */
+static pot_lock_t g_reg_lock;   /* P2-8：CPU1 也会登记任务（idle/演示任务） */
+static uint32_t g_stack_guard_faults;
 
 void pot_task_register(pot_task_t *t)
 {
+    uint32_t ps = pot_lock_acquire(&g_reg_lock);
     for (volatile int i = 0; i < g_reg_n; i++) {
         if (g_registry[i] == t) {
+            pot_lock_release(&g_reg_lock, ps);
             return; /* 已登记（TCB 复用场景） */
         }
     }
     if (g_reg_n >= REG_MAX) {
         g_reg_overflow++;
+        pot_lock_release(&g_reg_lock, ps);
         return;
     }
     g_registry[g_reg_n++] = t;
+    pot_lock_release(&g_reg_lock, ps);
 }
 
 uint32_t pot_task_reg_overflow(void)
@@ -59,6 +66,27 @@ int pot_task_count(void)
 pot_task_t *pot_task_at(int i)
 {
     return (i >= 0 && i < g_reg_n) ? g_registry[i] : 0;
+}
+
+uint32_t pot_task_stack_guard_faults(void)
+{
+    return g_stack_guard_faults;
+}
+
+/* 切换时校验栈底哨兵：命中即计数、重新布防并留追踪事件（P2-3）。
+ * 只读/写栈底之外的空闲字，不影响当前栈帧。 */
+void pot_task_stack_guard_check(pot_task_t *t)
+{
+    if (t == 0 || t->stk_lo == 0 || t->stk_words < 2u) {
+        return;
+    }
+    if (t->stk_lo[0] != POT_STACK_GUARD) {
+        g_stack_guard_faults++;
+        if (pot_smp_cpu_id() == 0u) { /* 追踪环 CPU0 单写者 */
+            trace_push(TR_MEM_FAULT, 5 /* stack guard */, (uint32_t)t);
+        }
+        t->stk_lo[0] = POT_STACK_GUARD; /* 重新布防，避免每次切换重复刷屏 */
+    }
 }
 
 /* 栈水位（D-13）：创建时填充花样，tasks 命令扫描从未触碰的连续字数 */
@@ -97,6 +125,7 @@ static int task_create_common(pot_task_t *tcb, const char *name,
     uint32_t top = (uint32_t)(stack + stack_words) & ~15u;
     uint32_t *frame = (uint32_t *)(top - FRAME_WORDS * 4);
     pot_task_stack_paint(stack, (uint32_t)(frame - stack));
+    stack[0] = POT_STACK_GUARD; /* P2-3：栈底哨兵（最后一个布，防被 paint 覆盖） */
 
     for (volatile int i = 0; i < FRAME_WORDS; i++) {
         frame[i] = 0;
@@ -121,8 +150,12 @@ static int task_create_common(pot_task_t *tcb, const char *name,
     tcb->cpu = -1;
     tcb->affinity = cpu_affinity;
 
+    /* P1-3：入队失败（就绪表满）必须让创建方看到失败，不得留下 READY 幽灵 */
+    if (sched_static_enqueue(tcb) != 0) {
+        tcb->state = POTTASK_DEAD;
+        return -1;
+    }
     pot_task_register(tcb);
-    sched_static_enqueue(tcb);
     return 0;
 }
 

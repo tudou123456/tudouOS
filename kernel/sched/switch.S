@@ -70,16 +70,16 @@ pot_task_trampoline:
     .globl pot_do_resume
 pot_do_resume:
     l32i    a1, a2, TCB_SP_OFF
+#if TUDOU_PLATFORM == 0
+    /* QEMU 模型：E-02 实证 rfe 从 SR194（eps2 槽）取 PS */
     movi    a3, pot_task_ps
     l32i    a3, a3, 0
-    wsr     a3, 194               /* 常态 PS → SR194（rfe 取数槽） */
-#if TUDOU_PLATFORM != 0
-    /* 真机：EPS1 编号与 QEMU 实证槽（SR194）可能不一致（本 binutils
-     * 配置无 eps1 名、176=configid0、194=eps2；真机 rfe 读标准 EPS1）。
-     * 双写盲覆盖：常态 PS 是内核常量，写两个候选槽都安全——
-     * 176 若为 configid0 则写被忽略；194 若为 eps2 则仅在 EXCM=1
-     * 区间内被改，level-2 入口会重填，无副作用。 */
-    wsr     a3, 176
+    wsr     a3, 194
+#else
+    /* P2-1：真机 level-1 异常不保存 PS（无 EPS1 可写），rfe 只需
+     * EPC1；当前 PS 的 UM/CALLINC 等位继承自被打断任务，INTLEVEL/
+     * EXCM 由 rfe 清回。不要写 EPS2——那是上一次 level-2 中断的
+     * 陈旧现场，写进去反而可能污染恢复。 */
 #endif
     l32i    a3, a1, 0
     wsr.epc1 a3                   /* 续体 PC = 帧 a0 槽 */
@@ -117,17 +117,11 @@ pot_do_resume:
     .globl pot_do_resume_irq
 pot_do_resume_irq:
     l32i    a1, a2, TCB_SP_OFF
-#if TUDOU_PLATFORM != 0
-    /* 真机：帧 +80 存的是 SR176（本 binutils 中 = configid0，实测
-     * 0xc2f0fffe 垃圾值），真正的异常 PS 在 +84（SAVE 时 rsr 194）。
-     * QEMU 的 rsr 194 就是该槽，走下面的 80。 */
-    l32i    a3, a1, 84
+#if TUDOU_PLATFORM == 0
+    l32i    a3, a1, 80            /* QEMU：SR194 快照 → rfe 取数槽 */
+    wsr     a3, 194
 #else
-    l32i    a3, a1, 80
-#endif
-    wsr     a3, 194               /* 异常 PS → SR194（rfe 的取数槽） */
-#if TUDOU_PLATFORM != 0
-    wsr     a3, 176               /* 真机双写（同 pot_do_resume 注） */
+    /* P2-1：真机 rfe 只用 EPC1；不碰 EPS2（陈旧 level-2 现场） */
 #endif
     l32i    a3, a1, 76
     wsr.epc1 a3                   /* 恢复续体 PC */

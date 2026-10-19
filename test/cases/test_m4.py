@@ -4,6 +4,7 @@
 碎片率有上界（回收后 largest 恢复）、分配流水可回放。
 """
 
+import json
 import re
 import time
 
@@ -93,25 +94,25 @@ def test_mem_churn_soak(ctx):
 
 
 def test_mem_trace(ctx):
-    """追踪环含 MEM_ALLOC/MEM_FREE 事件（分配流水可回放）。"""
+    """追踪环含 MEM_ALLOC/MEM_FREE 事件（分配流水可回放）。
+
+    审计修复：dump 期间环持续滑动是结构性 flaky；改用 trace meta 的
+    累计 counts 前后差值（真机侧 test_hw_m4 同判据）。"""
     ctx.serial.expect(READY_LINE, timeout=20)
+    ctx.serial.send("trace meta")
+    m = ctx.serial.expect(r"\[POTATO\]\[TRM\] (\{[^\r\n]*\})\r", timeout=10)
+    before = {c["ev"]: int(c["n"]) for c in json.loads(m.group(1)).get("counts", [])}
+
     ctx.serial.send("memtest holes")  # 产生成对 alloc/free
     ctx.serial.expect(r"\[POTATO\]\[MEM\] HOLES-PASS", timeout=30)
-    ctx.serial.send("trace 200")
-    m = ctx.serial.expect(r"\[POTATO\]\[TR\] total=\d+ dropped=\d+ last (\d+):",
-                          timeout=5)
-    n_printed = int(m.group(1))
-    kinds = set()
-    for _ in range(n_printed):
-        try:
-            m2 = ctx.serial.expect(
-                r"\[POTATO\]\[TR\] #\d+ t=\d+ (MEM_ALLOC|MEM_FREE|MEM_FAULT|MSG_\w+|SCHED_SWITCH|IRQ_\w+)",
-                timeout=3)
-            if m2.group(1).startswith("MEM_"):
-                kinds.add(m2.group(1))
-        except Exception:
-            break
-    assert {"MEM_ALLOC", "MEM_FREE"} <= kinds, f"内存事件缺失: {kinds}"
+
+    ctx.serial.send("trace meta")
+    m = ctx.serial.expect(r"\[POTATO\]\[TRM\] (\{[^\r\n]*\})\r", timeout=10)
+    after = {c["ev"]: int(c["n"]) for c in json.loads(m.group(1)).get("counts", [])}
+    da = after.get("MEM_ALLOC", 0) - before.get("MEM_ALLOC", 0)
+    df = after.get("MEM_FREE", 0) - before.get("MEM_FREE", 0)
+    assert da >= 8, f"MEM_ALLOC 事件增量不足: {da}"
+    assert df >= 8, f"MEM_FREE 事件增量不足: {df}"
 
 
 def test_heap_double_free(ctx):

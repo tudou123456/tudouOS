@@ -11,14 +11,14 @@
 > | 第 2 批 | `1377d79` | D-01✅（去重限定 QoS1+，多请求 4/4 探针实证+用例）、D-07✅（内联负载 256/控制台 264/超长两档显式报错+json 释放迭代化）、D-19✅（\uXXXX 完整含代理对，修复前看未跳 \u 前缀缺陷；SerialTap 增量解码）、D-20✅（initialize 握手/tools-list 规范 schema/tools-call content 形态/id 三态/notification 静默/-32602；④传输帧标识仍留待后续）、D-25✅（potfs 写时复制+并发临界区+append 删除+定位澄清） |
 > | 第 3 批 | `918d8fb` | D-05✅（头完整性校验+墓碑隔离，memtest szcorrupt）、D-06✅（DEAD 墓碑防合并后二次释放，memtest dblfree）、D-21✅（超大请求拒绝）、D-22✅（上邻双端校验）、D-24✅（位图真参与查找+释放事件保 tag+largest 标注近似） |
 > | 第 4 批 | `ced7674` | D-11✅（表 16 槽+溢出计数+事件）、D-12✅（注册表去重+16）、D-13✅（判空+栈水位+idle 4KB——实测 1KB 会被中断帧击穿）、D-04✅（rsil1 临界区覆盖堆/potfs/消息环/追踪环/sched——真抢占下堆空闲链当场损坏的实证修复）、D-14✅（统一 rfe 恢复消灭半恢复窗口）、D-18✅（seq 32 位+写入短临界区）、**D-03 部分完成（v5）**：tick 已 int6 中断驱动（时间独立于检查点、抖动 11892→~2.7ms、看门狗自愈），抢占切换完整接线（IRQ 帧 rfe+frame_kind 双帧制+`preempt on|off`）但 **QEMU 默认关**——模型级缺陷（genex 切走+CCOMPARE 活动随机丢 tick/任务重复执行，临界区与寄存器用法均已排除），真机默认应开（qemu-testing.md 已知问题表定论） |
-> | 第 5 批 | （本提交） | D-29✅（`-` 二进制移出+gitignore 增补）、第 7 节部分收口（README/architecture 测试台与调度措辞、M6 行按 D-20 后实态重写） |
+> | 第 5 批 | `6390bf1` | D-29✅（`-` 二进制移出+gitignore 增补）、第 7 节部分收口（README/architecture 测试台与调度措辞、M6 行按 D-20 后实态重写） |
+> | 第 6/7 批 | `ec4c37f` / `8aa1fa5` | M7/M8/M9 功能交付（以太网/可观测/SMP）与真机串口 MCP 回归台 |
+> | 第 8 批（独立审计收口） | 本次修复（工作树） | 见 §12：P0-1..P0-5、P1-1..P1-6、P2-1..P2-8、P3 卫生全部收口；D-03 真机默认开、D-16/D-17/D-28/D-30 关闭；QEMU **69/69 两连绿** + 真机 **74 例 72 PASS/0 FAIL/2 SKIP** |
 >
-> **未完成/遗留**：D-16（QoS2 drop_oldest 保护——策略树内零启用，留 M7 消息纪元一并做）、
-> D-17（窗口分桶——同上）、D-26（时基运行时标定+hw 构建门禁——hw 后端仍未编译过，
-> 留真机带板批）、D-28（死代码清理——与并行 M8 会话的文件冲突，未动）、
-> D-30（CPENABLE/%d UB——P3 卫生，未动）、第 7 节其余条目（M7/M8 规划口径）、
-> D-03 真机默认开（带板时验证）。另：`test_no_yield_no_starvation` 已改为 v5 判别性
-> 断言（无检查点忙烧期间 tick 持续推进）。
+> **未完成/遗留**：无 P0/P1 项。P2/P3 的待真机专项（CPU1 tick 抢占默认开、
+> 48h soak、10⁷ 次上下文切换、SMP 缓存/内存序长稳、外挂以太网模块）作为
+> 发布后跟踪项保留，不阻塞当前版本。`test_no_yield_no_starvation` 已改为
+> v5 判别性断言（无检查点忙烧期间 tick 持续推进）。
 >
 > 本文档面向实施者（人 / AI Agent）。每条缺陷含 **位置 → 证据 → 根因 → 修复 → 验收** 五段，
 > 可直接按编号逐条施工。
@@ -1060,6 +1060,60 @@ cmd /c "cd /d D:\tudouOS && python -m test.runner"    # 必须全绿
 - `.gitignore` 合理；`build/` 与 `test/logs/` 均未被跟踪。
 - 测试台设计正确：每用例独立 QEMU + 动态端口 + `-S` 冻结后先连 QMP/串口再 `cont`
   （实测所有 serial.log 从 ROM 第一行开始，零丢失）；两轮 31 用例结果完全一致，无 flaky。
+
+---
+
+## 12. 2026-10-19 独立审计修复批次（第 8 批）
+
+审计报告：[audit-report-2026-10-19.md](audit-report-2026-10-19.md)。基线
+`8aa1fa5`；本批把审计的 P0/P1/P2/P3 全部收口，新增回归用例并完成
+QEMU 69/69（连续两轮）与真机 74 例回归（72 PASS / 0 FAIL / 2 SKIP）。
+
+| 审计编号 | 位置 | 修复 | 回归 |
+| --- | --- | --- | --- |
+| P0-1 | `kernel/mcp/mcp.c` | `jid_t` 增加 64B 副本，解析时复制字符串 id；`render_id` 缓冲按最坏转义放大；>64B id 显式 `-32600` 拒绝 | `test_mcp_string_id_echo` + 真机 `m6/string_id_echo` |
+| P0-2 | `kernel/sched/sched.c` | syscall 切换按 `next->frame_kind` 分派 `pot_do_resume_irq` / `pot_do_resume`；真机 `preempt` 默认开 | QEMU 全量 + 真机 `m3/taskdemo_*`、`m9/*` |
+| P0-3 | `kernel/include/intc.h`、`intc.c` | 新增 S32C1I 跨核锁 `pot_lock_acquire/release`；heap/msg/potfs/trace/注册表覆盖；`pot_atomic_swap_zero` | `test_m9_xcore_locks_heap_fs_msg` + 真机 `m9/xcore_stress`（5 万+ ops 零损坏） |
+| P0-4 | `kernel/fs/potfs.c` | 读/写/删/统计统一持 fs 锁；写侧释放旧 data 与读复制同域 | 同上 |
+| P0-5 | `kernel/net/netmcp.c` | UDP 只接受固定 peer；ack 校验 `epoch==g_epoch && ack<=g_tx_seq`；源地址拒绝计数 `reject` | `test_m7_net_*` + 真机 `m7/raw_frame_rpc` |
+| P1-1 | `kernel/msg/msg.c`、`msg.h` | 去重/回执窗口 4 发送方桶×4 槽；回执按入队 seq 配对；QoS0 不占窗口；drop_oldest 同步移除去重条目 | `test_msg_*`（含 retry/dedup/timeout） |
+| P1-2 | `kernel/trace/trace.c` | 写者统一跨核锁；level-2/level-1/任务态串行化 | QEMU/真机 trace 用例 |
+| P1-3 | `kernel/sched/sched.c`、`smp.c` | `enqueue_ready`/`sleep_add` 返回失败；yield/sleep/wake/迁移/创建全部回滚，不再丢任务 | `test_m3`、`test_m9`、`tasks` 的 `drop` 计数 |
+| P1-4 | `kernel/sched/sched.c` | `should_preempt_cpu` 全程持调度锁，不再无锁调 `pick_best` | 双核压测 |
+| P1-5 | `kernel/smp/smp.c` | IPI 先清 MMIO 源，再用 S32C1I 原子换出 pending（原因位不丢） | 真机 `m9/ipi_path` |
+| P1-6 | `kernel/mcp/mcp.c`、`netmcp.c` | 远程写默认只读，`netmcp rw on` 显式授权；串口可信入口不受限 | 真机 `m7/*`、README 信任边界 |
+| P2-1 | `kernel/intc/vectors.S`、`sched/switch.S` | 定论：level-1 无 EPS1；+80 置 0、+84 留 EPS2 快照；真机 rfe 只用 EPC1 | 真机 preempt/调度回归 |
+| P2-2 | `kernel/smp/cpu1_entry.S` | 先 `windowbase=0/windowstart=1` 再换栈 | 真机 `m9/selftest_and_start` |
+| P2-3 | `kernel/sched/task.c`、`sched.c` | 栈底哨兵 + 切换校验 + `tasks` 的 `guard=` 计数 | QEMU/真机 `tasks` 用例 |
+| P2-4 | `kernel/time/timg_timer.c` | `T0_UPDATE` 写 bit31 | 编译路径（默认未启用） |
+| P2-5 | `kernel/intc/intc.c` | level-3 未知源先屏蔽 INTENABLE 再 rfi，防风暴 | 代码审查 |
+| P2-6 | `kernel/kernel/main.c`、`sched.c` | sched/smp 初始化移到放行中断之前；`pot_task_ps` 显式清 INTLEVEL/EXCM | 全量（真机 tick/老化） |
+| P2-7 | `kernel/sched/sched.c` | `g_bg_used` 两核 RMW 持调度锁 | 双核压测 |
+| P2-8 | `kernel/sched/task.c`、`kernel/kernel/console.c` | 注册表加锁；`potato_printf` 按行跨核锁（同核递归按深度放行） | 真机 M9/MCP 输出 |
+| P3 | `sched.c`、`smp.h`、`task.h`、`tools/build.py` | 删除 `pot_sched_resched_from_irq`；注释 rfe 口径；QEMU 版本用 `--version` 判定；objcopy 空段告警静默；README 文件名/数字对齐 | 构建日志干净 |
+
+**测试稳定化**：`test_msg_trace` / `test_mem_trace` 改用 `trace meta` 的
+累计 counts 前后差值（与真机侧一致），消除"dump 期间环滑动"的结构性
+flaky；QEMU 门禁改为连续两轮全绿。
+
+**验证命令**
+
+```bash
+cmd /c "cd /d D:\tudouOS && py -3.14 tools/build.py --clean"
+cmd /c "cd /d D:\tudouOS && py -3.14 -m test.runner"          # 69/69（两轮）
+cmd /c "cd /d D:\tudouOS && py -3.14 tools/build.py --platform hw --clean"
+py -3.14 -m esptool --chip esp32s3 --port COM3 --baud 921600 write-flash 0x0 build/potato_boot_hw.bin
+py -3.14 -m test.hw_runner --port COM3 --keep-going            # 72 PASS/0 FAIL/2 SKIP
+```
+
+**完整门禁（2026-10-19 22:52–23:00）**：`py -3.14 tools/release_gate.py
+--rounds 2 --hw-port COM3` → exit 0；干净构建 34/34 + IROM 88708B 自检 OK，
+QEMU **69/69 两连绿**，真机 **74 例 72 PASS/0 FAIL/0 TIMEOUT/2 SKIP**。
+固件 `potato_boot_hw.bin` 91376B，SHA256
+`47d4af9e5d59e41ae404ed3a04bb6764cd39c12574b3df70b3064c4dd19f8a1c`，
+烧录 `Hash of data verified`。证据与日志清单：
+[release-gate-2026-10-19.md](release-gate-2026-10-19.md)（归档
+`test/logs/gate-2026-10-19/`）。
 
 ---
 

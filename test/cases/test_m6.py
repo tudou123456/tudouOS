@@ -156,6 +156,41 @@ def test_mcp_initialize(ctx):
     assert '"id":"sid"' in resp and '"pong":true' in resp, resp
 
 
+def test_mcp_string_id_echo(ctx):
+    """P0-1 回归：字符串 id 在请求树释放后仍原样回显（UAF 修复）。
+
+    覆盖 initialize/tools/list/tools/call 三条响应路径 + 长 id（60B）+
+    转义 id（引号/反斜杠）+ 超长 id（>64B 显式拒绝，不回读悬空内存）。
+    """
+    ctx.serial.expect(READY_LINE, timeout=20)
+    ctx.serial.send("mcp on")
+    ctx.serial.expect(r"\[POTATO\]\[MCP\] agent started", timeout=15)
+
+    resp = _mcp(ctx, '{"jsonrpc":"2.0","id":"init-1","method":"initialize",'
+                     '"params":{}}')
+    assert '"id":"init-1"' in resp and '"protocolVersion"' in resp, resp
+
+    resp = _mcp(ctx, '{"jsonrpc":"2.0","id":"list-2","method":"tools/list"}')
+    assert '"id":"list-2"' in resp and '"tools"' in resp, resp
+
+    resp = _mcp(ctx, '{"jsonrpc":"2.0","id":"call-3","method":"tools/call",'
+                     '"params":{"name":"echo","arguments":{"text":"x"}}}')
+    assert '"id":"call-3"' in resp and '\\"echo\\":\\"x\\"' in resp, resp
+
+    long_id = "L" * 60
+    resp = _mcp(ctx, '{"jsonrpc":"2.0","id":"%s","method":"ping"}' % long_id)
+    assert ('"id":"%s"' % long_id) in resp and '"pong":true' in resp, resp
+
+    # JSON id 原文 a\"b\\c（解析值 a"b\c）→ 响应 id 必须同样转义回显
+    ctx.serial.send('{"jsonrpc":"2.0","id":"a\\"b\\\\c","method":"ping"}')
+    ctx.serial.expect(r'\{"jsonrpc":"2\.0","id":"a\\"b\\\\c","result":.*\}\r',
+                      timeout=15)
+
+    too_long = "T" * 65
+    resp = _mcp(ctx, '{"jsonrpc":"2.0","id":"%s","method":"ping"}' % too_long)
+    assert '"code":-32600' in resp and "id too long" in resp, resp
+
+
 def test_mcp_unicode(ctx):
     """D-19 回归：\\uXXXX 转义（含代理对 emoji）正确解析并 UTF-8 回传。"""
     ctx.serial.expect(READY_LINE, timeout=20)

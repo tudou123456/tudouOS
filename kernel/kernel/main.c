@@ -47,17 +47,18 @@ void kernel_main(void)
     pot_boot_mark('3');
     pot_drivers_init(); /* M5：驱动框架（uart 已注册，幂等初始化） */
     pot_boot_mark('4');
-    /* 先开全局中断再逐级使能设备源（INTENABLE 未置位时不放行任何源，安全）；
-       若保持 INTLEVEL=15 期间置起设备中断，QEMU 会陷入活锁 */
+    /* P2-6：调度/SMP 状态必须在任何中断可能进来之前就绪（g_cur[0]、
+     * SCOMPARE1、IPI 路由）。先建好状态，再放行中断并逐级使能设备源；
+     * INTENABLE=0 期间即使全局中断放开也没有源能投递。 */
+    pot_sched_init(); /* M3：调度器（main 即控制台任务，idle 兜底） */
+    pot_smp_init();   /* M9：SMP 状态与 IPI 矩阵（默认单核，smp start 起 CPU1） */
     intc_enable_interrupts();
     intc_init();
     pot_boot_mark('5');
     time_source_init();
     tick_init();
     pot_boot_mark('6');
-    pot_sched_init(); /* M3：调度器（main 即控制台任务，idle 兜底） */
     tick_irq_arm();   /* D-03 v5：tick 中断驱动抢占（E-02 实证 rfe 路线） */
-    pot_smp_init();   /* M9：SMP 状态与 IPI 矩阵（默认单核，smp start 起 CPU1） */
     pot_boot_mark('7');
     pot_heap_init();  /* M4：轻量堆（消息基座大负载/动态栈的地基） */
     pot_boot_mark('8');

@@ -1,8 +1,12 @@
 ﻿#include <stdint.h>
 
 #include "console.h"
+#include "heap.h"
 #include "intc.h"
 #include "io.h"
+#include "lib_shim.h"
+#include "msg.h"
+#include "potfs.h"
 #include "smp.h"
 #include "task.h"
 #include "tick.h"
@@ -285,6 +289,7 @@ void pot_smp_cpu1_main(void)
     g_cpu1_idle_tcb.stk_lo = pot_cpu1_stack;
     g_cpu1_idle_tcb.stk_words = (uint32_t)POT_SMP_CPU1_STACK_WORDS;
     g_cpu1_idle_tcb.affinity = 1;
+    pot_cpu1_stack[0] = POT_STACK_GUARD; /* P2-3：CPU1 idle 栈哨兵 */
     pot_task_register(&g_cpu1_idle_tcb);
     pot_sched_attach_cpu(1, &g_cpu1_idle_tcb);
 
@@ -369,7 +374,11 @@ void pot_smp_balance_tick(void)
     g_bal_diag_r1 = r1;
     g_bal_diag_aff = t->affinity;
     g_bal_diag_n++;
-    pot_sched_put_ready(dst, t);
+    if (pot_sched_put_ready(dst, t) != 0) {
+        /* 目标队列满（防御）：放回源队列，不得丢任务（P1-3） */
+        (void)pot_sched_put_ready(src, t);
+        return;
+    }
     g_balance_hold_ms = pot_sched_now() + 20u;
     g_cpus[dst].mig_in++;
     g_cpus[src].mig_out++;
@@ -423,6 +432,236 @@ void pot_smp_work_dump(void)
     }
 }
 
+/* ---------- P0-3/P0-4 跨核数据结构压测 ----------
+ * 两核各一任务循环执行：堆分配/校验/释放、potfs 写/读/校验、消息
+ * send/recv（共享通道）。锁失效时表现为内容损坏/故障计数/崩溃，
+ * 而不是靠时序猜测。计数器区分"资源暂时不足"（fail/drop）与"数据
+ * 损坏"（bad）——前者在压测并发下允许，后者必须为 0。 */
+
+#define XS_CH_CAP 2u      /* 压测通道只需容纳两核在途消息，控制 BSS */
+#define XS_STK_WORDS 512u /* 2KB/任务；栈从堆动态取，不占静态堆空间 */
+#define XS_TAG 0x5853u
+
+static pot_channel_t g_xs_ch;
+static pot_msg_t *g_xs_ring; /* 启动时从堆分配（不压缩静态堆总容量） */
+static pot_task_t g_xs_tcb[2];
+static uint32_t *g_xs_stk[2]; /* 启动时从堆分配（不压缩静态堆总容量） */
+static volatile int g_xs_run;
+static volatile int g_xs_ever;
+static volatile uint32_t g_xs_sent, g_xs_recv, g_xs_drop, g_xs_msg_bad;
+static volatile uint32_t g_xs_heap_ops, g_xs_heap_fail, g_xs_heap_bad;
+static volatile uint32_t g_xs_fs_ops, g_xs_fs_fail, g_xs_fs_bad;
+
+static void xs_msg_pack(pot_msg_t *m, uint32_t v)
+{
+    m->len = 4;
+    m->data[0] = (uint8_t)v;
+    m->data[1] = (uint8_t)(v >> 8);
+    m->data[2] = (uint8_t)(v >> 16);
+    m->data[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t xs_msg_unpack(const pot_msg_t *m)
+{
+    return (uint32_t)m->data[0] | ((uint32_t)m->data[1] << 8) |
+           ((uint32_t)m->data[2] << 16) | ((uint32_t)m->data[3] << 24);
+}
+
+static void smp_stress_worker(void *arg)
+{
+    uint32_t me = (uint32_t)(uintptr_t)arg; /* 0/1 = 绑核号 */
+    char fname[10] = { 'x', 's', (char)('0' + me), '.', 't', 'm', 'p', 0, 0, 0 };
+    uint32_t k = me * 100000u + 1u;
+    while (g_xs_run) {
+        /* 消息：每轮生产一条并尝试消费一条（跨核共享通道） */
+        pot_msg_t m;
+        memset(&m, 0, sizeof(m));
+        m.id = k;
+        m.type = (uint16_t)(XS_TAG + me);
+        m.qos = POT_MSG_QOS0;
+        xs_msg_pack(&m, k);
+        if (pot_msg_send(&g_xs_ch, &m, 5u) == 0) {
+            g_xs_sent++;
+        } else {
+            g_xs_drop++; /* QoS0 满：允许丢弃，不是损坏 */
+        }
+        pot_msg_t r;
+        if (pot_msg_recv(&g_xs_ch, &r, 2u) == 0) {
+            if (r.len != 4u || xs_msg_unpack(&r) != r.id) {
+                g_xs_msg_bad++;
+            } else {
+                g_xs_recv++;
+            }
+        }
+
+        /* 堆：内容填充→校验→释放 */
+        uint32_t sz = 8u + ((k * 37u) & 0x7Fu);
+        uint8_t *p = (uint8_t *)pot_heap_alloc(sz, XS_TAG);
+        if (p == 0) {
+            g_xs_heap_fail++; /* 并发压测/大块占用下允许暂时失败 */
+        } else {
+            int bad = 0;
+            for (uint32_t i = 0; i < sz; i++) {
+                p[i] = (uint8_t)(k + i);
+            }
+            for (uint32_t i = 0; i < sz; i++) {
+                if (p[i] != (uint8_t)(k + i)) {
+                    bad = 1;
+                    break;
+                }
+            }
+            pot_heap_free(p);
+            if (bad) {
+                g_xs_heap_bad++;
+            } else {
+                g_xs_heap_ops++;
+            }
+        }
+
+        /* 文件：写→读→逐字节校验（每任务独立文件名，避免语义覆盖） */
+        char wbuf[16];
+        for (uint32_t i = 0; i < sizeof(wbuf); i++) {
+            wbuf[i] = (char)('a' + ((k + i) % 26u));
+        }
+        if (potfs_write(fname, wbuf, sizeof(wbuf)) != (int)sizeof(wbuf)) {
+            g_xs_fs_fail++;
+        } else {
+            char rbuf[16];
+            int n = potfs_read(fname, rbuf, sizeof(rbuf));
+            int bad = (n != (int)sizeof(rbuf));
+            for (int i = 0; !bad && i < n; i++) {
+                if (rbuf[i] != wbuf[i]) {
+                    bad = 1;
+                }
+            }
+            if (bad) {
+                g_xs_fs_bad++;
+            } else {
+                g_xs_fs_ops++;
+            }
+        }
+
+        k++;
+        if ((k & 7u) == 0u) {
+            pot_task_yield();
+        }
+    }
+    pot_task_exit();
+}
+
+static void xs_free_stacks(void)
+{
+    if (g_xs_ring != 0) {
+        pot_heap_free(g_xs_ring);
+        g_xs_ring = 0;
+    }
+    for (uint32_t i = 0; i < 2u; i++) {
+        if (g_xs_stk[i] != 0) {
+            pot_heap_free(g_xs_stk[i]);
+            g_xs_stk[i] = 0;
+        }
+    }
+}
+
+static int xs_tcb_done(uint32_t i)
+{
+    return g_xs_tcb[i].name == 0 || g_xs_tcb[i].state == POTTASK_DEAD;
+}
+
+static void xs_abort_start(void)
+{
+    g_xs_run = 0;
+    for (uint32_t i = 0; i < 50u; i++) {
+        if (xs_tcb_done(0) && xs_tcb_done(1)) {
+            break;
+        }
+        pot_task_sleep(2);
+    }
+    if (xs_tcb_done(0) && xs_tcb_done(1)) {
+        xs_free_stacks();
+    }
+}
+
+int pot_smp_stress_start(void)
+{
+    if (g_xs_run) {
+        return 2;
+    }
+    if (g_cpus[1].online == 0u) {
+        return -1;
+    }
+    if (g_xs_ever && (!xs_tcb_done(0) || !xs_tcb_done(1))) {
+        return 2; /* 上一轮任务尚未退出 */
+    }
+    xs_free_stacks(); /* 上一轮若因退出慢未回收，先补回收 */
+    g_xs_ring = (pot_msg_t *)pot_heap_alloc(XS_CH_CAP * sizeof(pot_msg_t),
+                                            XS_TAG);
+    if (g_xs_ring == 0) {
+        return -1;
+    }
+    if (pot_channel_init(&g_xs_ch, "xs", g_xs_ring, XS_CH_CAP, 0) != 0) {
+        xs_free_stacks();
+        return -1;
+    }
+    for (uint32_t i = 0; i < 2u; i++) {
+        g_xs_stk[i] = (uint32_t *)pot_heap_alloc(XS_STK_WORDS * 4u, XS_TAG);
+        if (g_xs_stk[i] == 0) {
+            xs_free_stacks();
+            return -1;
+        }
+    }
+    g_xs_sent = g_xs_recv = g_xs_drop = g_xs_msg_bad = 0;
+    g_xs_heap_ops = g_xs_heap_fail = g_xs_heap_bad = 0;
+    g_xs_fs_ops = g_xs_fs_fail = g_xs_fs_bad = 0;
+    g_xs_run = 1;
+    g_xs_ever = 1;
+    if (pot_task_create_aff(&g_xs_tcb[1], "xs1", POTCLS_BACKGROUND,
+                            smp_stress_worker, (void *)(uintptr_t)1,
+                            g_xs_stk[1], XS_STK_WORDS, 1) != 0) {
+        xs_abort_start();
+        return -1;
+    }
+    if (pot_task_create_aff(&g_xs_tcb[0], "xs0", POTCLS_BACKGROUND,
+                            smp_stress_worker, (void *)(uintptr_t)0,
+                            g_xs_stk[0], XS_STK_WORDS, 0) != 0) {
+        xs_abort_start();
+        return -1;
+    }
+    return 0;
+}
+
+void pot_smp_stress_stop(void)
+{
+    if (!g_xs_run) {
+        pot_smp_stress_dump();
+        return;
+    }
+    g_xs_run = 0;
+    /* 等两个 worker 从切片睡眠/当前操作里退出（最多 ~100ms） */
+    for (uint32_t i = 0; i < 50u; i++) {
+        if (xs_tcb_done(0) && xs_tcb_done(1)) {
+            break;
+        }
+        pot_task_sleep(2);
+    }
+    if (xs_tcb_done(0) && xs_tcb_done(1)) {
+        xs_free_stacks(); /* 任务已死，栈可安全归还堆 */
+    }
+    pot_smp_stress_dump();
+}
+
+void pot_smp_stress_dump(void)
+{
+    potato_printf("[POTATO][SMP] xstress run=%d sent=%u recv=%u drop=%u "
+                  "msg_bad=%u heap_ops=%u heap_fail=%u heap_bad=%u "
+                  "fs_ops=%u fs_fail=%u fs_bad=%u\r\n",
+                  g_xs_run ? 1 : 0, (unsigned)g_xs_sent, (unsigned)g_xs_recv,
+                  (unsigned)g_xs_drop, (unsigned)g_xs_msg_bad,
+                  (unsigned)g_xs_heap_ops, (unsigned)g_xs_heap_fail,
+                  (unsigned)g_xs_heap_bad, (unsigned)g_xs_fs_ops,
+                  (unsigned)g_xs_fs_fail, (unsigned)g_xs_fs_bad);
+}
+
 /* ---------- 核间中断 ---------- */
 
 void pot_smp_ipi_send(uint32_t cpu, uint32_t reason)
@@ -444,10 +683,14 @@ void pot_smp_ipi_handler(void *frame_base)
 {
     uint32_t me = pot_smp_cpu_id();
     uint32_t sender = me ^ 1u;
-    uint32_t pend = g_ipi_pending[me];
 
-    g_ipi_pending[me] = 0;
-    mmio_write(smp_intr_reg(sender), 0u); /* 清源（发送方的 FROM_CPU 寄存器） */
+    /* P1-5：先清 MMIO 源，再原子换出 pending。顺序反了会在
+     * "读 pending → 清 pending" 之间吞掉对核新置的原因位。
+     * 原子换出保证：置位若发生在换出前则本次处理，之后则留在 pending
+     * 里并由对核的 MMIO 写重新触发（原因不丢）。 */
+    mmio_write(smp_intr_reg(sender), 0u);
+    asm volatile("memw" ::: "memory");
+    uint32_t pend = pot_atomic_swap_zero(&g_ipi_pending[me]);
     g_cpus[me].ipi_recv++;
 
     if ((pend & ~(POT_IPI_RESCHED | POT_IPI_WAKE | POT_IPI_HALT)) != 0u) {

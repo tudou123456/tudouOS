@@ -31,7 +31,7 @@ python -m test.runner
 > 传输（见 [ethernet.md](ethernet.md) §8、[serial-mcp.md](serial-mcp.md)）。
 
 > 真机用例不在 `test/cases/`：串口回归台用 `test/hw_runner.py` 发现
-> `test/hw_cases/test_hw_*.py`（72 条，M1–M9），与 QEMU runner 互不干扰。
+> `test/hw_cases/test_hw_*.py`（74 条，M1–M9），与 QEMU runner 互不干扰。
 > 用法：`py -3.14 -m test.hw_runner --port COM3 --keep-going`；报告见
 > [test/logs/hw/summary.md](../test/logs/hw/summary.md)。
 

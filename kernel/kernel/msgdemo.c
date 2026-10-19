@@ -233,9 +233,9 @@ void msgdemo_stat(void)
                   g_ch.high_water, g_ch.c_enq, g_ch.c_deq, g_ch.c_drop_full,
                   g_ch.c_drop_dedup, g_ch.c_drop_deadline, g_ch.c_retry,
                   g_ch.c_ack,
-                  (uint32_t)g_ch.dedup[0].sender, g_ch.dedup[0].id,
-                  (uint32_t)g_ch.acked[0].sender, g_ch.acked[0].id,
-                  (uint32_t)g_ch.acked[1].sender, g_ch.acked[1].id);
+                  (uint32_t)g_ch.dedup[0][0].sender, g_ch.dedup[0][0].id,
+                  (uint32_t)g_ch.acked[0][0].sender, g_ch.acked[0][0].seq,
+                  (uint32_t)g_ch.acked[0][1].sender, g_ch.acked[0][1].seq);
 }
 
 const char *msgdemo_mode_help(void)

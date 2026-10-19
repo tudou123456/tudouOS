@@ -32,4 +32,11 @@ int mcp_submit_line(const char *line, uint32_t len);
  * 捕获并回送对端）。注意：不可从 ISR 调用。 */
 void mcp_handle_line(const char *line);
 
+/* P1-6：调用来源标记。REMOTE 表示经网络/串口远程通道进入；REMOTE_WRITE
+ * 表示该通道被授权执行写类工具（fs.write）。默认远程通道只读——任意入口
+ * 都能 fs.write 等于网络一暴露就给了任意写权限。 */
+#define MCP_FLAG_REMOTE       0x1u
+#define MCP_FLAG_REMOTE_WRITE 0x2u
+void mcp_handle_line_ex(const char *line, uint32_t flags);
+
 #endif /* TUDOU_MCP_H */

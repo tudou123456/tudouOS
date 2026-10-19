@@ -48,6 +48,17 @@ typedef struct {
 /* 等待者槽位（发送/接收混排，醒来各自重查） */
 #define POT_CH_WAITERS 4
 
+/* 去重/回执窗口：按发送方分桶（P1-1）。
+ * 8 槽共享窗口在多个发送方下会互相挤出条目——重复消息被二次投递；
+ * 回执按 id 配对又会在发送方复用 id 时唤醒错误批次。改为：
+ *   - 4 个发送方桶 × 4 槽（最近 4 条/发送方）
+ *   - 去重条目记录入队 seq；回执按 seq 配对，不按 id
+ *   - 只对 QoS1/2 记账（QoS0 无重发/回执语义，不得挤占窗口）
+ *   - 条目对应消息已回执时，同 id 的新消息按新消息处理（允许安全复用 id）
+ *   - QoS1 drop_oldest 丢最旧时同步移除其去重条目，重发可重新入队 */
+#define POT_MSG_BUCKETS 4
+#define POT_MSG_BUCKET_SLOTS 4
+
 /* 通道（调用方静态提供环形缓冲） */
 typedef struct {
     const char *name;
@@ -58,19 +69,20 @@ typedef struct {
     uint8_t drop_oldest; /* QoS1 满时丢最旧（0=阻塞） */
     uint32_t next_seq;
 
-    /* 去重窗口（最近入队的 (sender,id)） */
+    /* 去重窗口（最近入队的 (sender,id,seq)） */
     struct {
         pot_task_t *sender;
         uint32_t id;
-    } dedup[8];
-    uint8_t dedup_idx;
+        uint32_t seq;
+    } dedup[POT_MSG_BUCKETS][POT_MSG_BUCKET_SLOTS];
+    uint8_t dedup_idx[POT_MSG_BUCKETS];
 
-    /* 回执窗口（最近回执的 (sender,id)） */
+    /* 回执窗口（最近回执的 (sender,seq)） */
     struct {
         pot_task_t *sender;
-        uint32_t id;
-    } acked[8];
-    uint8_t acked_idx;
+        uint32_t seq;
+    } acked[POT_MSG_BUCKETS][POT_MSG_BUCKET_SLOTS];
+    uint8_t acked_idx[POT_MSG_BUCKETS];
 
     pot_task_t *waiters[POT_CH_WAITERS];
     int n_waiters;

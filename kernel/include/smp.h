@@ -68,6 +68,13 @@ void pot_smp_sched_unlock(uint32_t ps);
 int pot_smp_spawn(int cpu_affinity, uint32_t n);
 void pot_smp_work_dump(void);
 
+/* P0-3/P0-4 跨核数据结构压测（console `smp stress on|off`）：
+ * 两核各一任务并发执行 heap alloc/free + potfs write/read + 消息
+ * send/recv，验证跨核锁没有数据损坏。0=ok -1=CPU1 未上线 -2=任务仍存活 */
+int  pot_smp_stress_start(void);
+void pot_smp_stress_stop(void);
+void pot_smp_stress_dump(void);
+
 /* CPU1 tick 抢占开关（默认 0：QEMU"genex 切走 + CCOMPARE 活动"丢 tick
  * 模型缺陷规避，与 CPU0 的 preempt 开关同源；真机可开）。 */
 void pot_smp_set_cpu1_preempt(int on);
@@ -90,8 +97,8 @@ int pot_smp_selftest(void);  /* 地址/掩码自检：0=ok */
 void pot_smp_cpu1_main(void);
 void pot_smp_cpu1_tick(void *frame_base);
 
-/* 调度器侧钩子（sched.c 提供、smp.c 调用）：
- * IPI/CPU1 tick 触发的"必要时重调度"（可能切换，不返回时表示已切换） */
-void pot_sched_resched_from_irq(void *frame_base);
+/* 调度器侧钩子（sched.c 提供、smp.c/中断路径调用）：
+ * 分核抢占决策与切换（可能切换，不返回时表示已切换） */
+void pot_sched_preempt_from_irq_cpu(uint32_t cpu, void *frame_base);
 
 #endif /* TUDOU_SMP_H */

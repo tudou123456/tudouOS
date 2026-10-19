@@ -22,6 +22,9 @@ CPU_LINE = (r"\[POTATO\]\[SMP\] cpu(\d) online=(\d+) up=(\d+) ipi_tx=(\d+) "
             r"rq=0/(\d+) cur=(\S+) boot=(\d+)ms")
 WORK_SUM = r"\[POTATO\]\[SMP\] work n=(\d+) cpu1_preempt=(\d+) balance_seq=(\d+)"
 WORK_CNT = r"\[POTATO\]\[SMP\] work(\d) count=(\d+)"
+XSTRESS = (r"\[POTATO\]\[SMP\] xstress run=(\d+) sent=(\d+) recv=(\d+) "
+           r"drop=(\d+) msg_bad=(\d+) heap_ops=(\d+) heap_fail=(\d+) "
+           r"heap_bad=(\d+) fs_ops=(\d+) fs_fail=(\d+) fs_bad=(\d+)")
 
 
 def _read_stat(ctx, timeout=10):
@@ -187,6 +190,63 @@ def test_m9_balance(ctx):
         mm = ctx.serial.expect(WORK_CNT, timeout=10)
         total += int(mm.group(2))
     assert total > 0, "压测任务未在任一核执行"
+
+
+def test_m9_xcore_locks_heap_fs_msg(ctx):
+    """P0-3/P0-4 回归：双核并发 heap/fs/msg，数据零损坏。
+
+    `smp stress on` 在两核各起一个后台任务，循环做堆分配校验、potfs
+    写读校验、消息收发；同时 CPU0 控制台跑 memtest churn 与 fs write/cat。
+    锁失效会表现为 heap_bad/fs_bad/msg_bad > 0、堆故障计数增长或崩溃。"""
+    ctx.serial.expect(READY_LINE, timeout=20)
+    _start_cpu1(ctx)
+
+    ctx.serial.send("memstat")
+    m = ctx.serial.expect(r"faults=(\d+)", timeout=8)
+    faults0 = int(m.group(1))
+
+    ctx.serial.send("smp stress on")
+    m = ctx.serial.expect(r"stress start rc=(-?\d+)", timeout=10)
+    assert int(m.group(1)) == 0, f"stress 启动失败 rc={m.group(1)}"
+    m = ctx.serial.expect(XSTRESS, timeout=10)
+    assert int(m.group(1)) == 1, "stress 未进入运行态"
+
+    # CPU0 控制台与两个 worker 并发：堆压测 + 文件读写
+    ctx.serial.send("memtest churn")
+    time.sleep(0.5)
+    for i in range(12):
+        payload = f"v{i}"
+        ctx.serial.send(f"fs write shared{i}.txt {payload}")
+        ctx.serial.expect(rf"\[POTATO\]\[FS\] wrote shared{i}\.txt", timeout=8)
+        ctx.serial.send(f"fs cat shared{i}.txt")
+        ctx.serial.expect(rf"{payload}\r", timeout=8)
+        ctx.serial.send(f"fs rm shared{i}.txt")
+        ctx.serial.expect(rf"\[POTATO\]\[FS\] removed shared{i}\.txt", timeout=8)
+    time.sleep(1.5)
+
+    ctx.serial.send("smp stress off")
+    m = ctx.serial.expect(XSTRESS, timeout=15)
+    vals = [int(x) for x in m.groups()]
+    (run, sent, recv, drop, msg_bad, hops, hfail, hbad,
+     fops, ffail, fbad) = vals
+    assert run == 0, "stress 未停止"
+    assert sent > 0 and recv > 0, f"跨核消息未流动: sent={sent} recv={recv}"
+    assert msg_bad == 0, f"跨核消息内容损坏: {msg_bad}"
+    assert hops > 0 and hbad == 0, f"跨核堆损坏: ops={hops} bad={hbad}"
+    assert fops > 0 and fbad == 0, f"跨核文件内容损坏: ops={fops} bad={fbad}"
+    assert hfail >= 0 and ffail >= 0 and drop >= 0  # 资源竞争允许的计数
+
+    ctx.serial.send("memtest off")
+    ctx.serial.expect(r"CHURN-DONE ops=(\d+) faults=(\d+)", timeout=30)
+    ctx.serial.send("memstat")
+    m = ctx.serial.expect(r"used=(\d+) .*faults=(\d+)", timeout=8)
+    assert int(m.group(2)) <= faults0, "压测期间出现堆故障"
+
+    ctx.serial.send("tasks")
+    ctx.serial.expect(r"\[POTATO\]\[TS\] now=", timeout=15)
+    d = ctx.serial.expect(r"drop ready=(\d+) sleep=(\d+) reg=(\d+) guard=(\d+)",
+                          timeout=10)
+    assert d.groups() == ("0", "0", "0", "0"), f"容器/栈哨兵异常: {d.group(0)}"
 
 
 def test_m9_stress_stability(ctx):

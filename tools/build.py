@@ -124,21 +124,33 @@ def bootloader_offset():
 def check_toolchain_versions(cc):
     """软性版本校验：工具链/QEMU 版本漂移会改变 QEMU 六坑相关测试的
     容差行为（envlib 固定的版本是实测基线），漂移即提醒。
-    版本号从安装路径解析（crosstool 发布目录名含版本），不执行进程。"""
+    工具链版本号从安装路径解析；QEMU 用 --version 输出判定乐鑫分支
+    （安装目录名不携带版本信息时路径嗅探会误报）。"""
     m = re.search(r"(\d+\.\d+\.\d+)", cc)
     if m and m.group(1) != "13.2.0":
         print(f"警告: 工具链版本 {m.group(1)} != 实测基线 13.2.0，"
               "QEMU 相关测试容差可能失真")
     qemu = envlib.find_qemu()
     if qemu:
-        # 版本目录可能在可执行文件的任一上级（third_party/qemu/<ver>/bin/..）
-        p = qemu
         esp_branch = False
-        for _ in range(5):
-            p = os.path.dirname(p)
-            if "esp-develop" in p or "esp-release" in p:
+        try:
+            r = subprocess.run([qemu, "--version"], capture_output=True,
+                               text=True, timeout=10)
+            ver = ((r.stdout or "") + (r.stderr or "")).lower()
+            # 乐鑫分支示例：QEMU emulator version 9.2.2 (esp_develop_...)
+            if "espressif" in ver or ("esp_" in ver and
+                                      ("develop" in ver or "release" in ver)):
                 esp_branch = True
-                break
+        except Exception:  # noqa: BLE001 - 版本探测失败不阻断构建
+            pass
+        if not esp_branch:
+            # 兜底：安装路径含分支名（老版本 QEMU 无 --version 标识时）
+            p = qemu
+            for _ in range(5):
+                p = os.path.dirname(p)
+                if "esp-develop" in p or "esp-release" in p:
+                    esp_branch = True
+                    break
         if not esp_branch:
             print(f"警告: QEMU 非乐鑫分支构建（{qemu}），已知六坑假设可能不成立")
 
@@ -242,6 +254,19 @@ def main():
     # v5 用连字符长选项(--flash-mode)；v4 用下划线(--flash_mode)
     fs = "--flash-" if v >= 5 else "--flash_"
     objcopy = cc.replace("gcc", "objcopy")
+
+    def run_objcopy(args):
+        """objcopy 的已知告警（移除 .irom_text 后空 PT_LOAD 段）不打印，
+        其它 stderr 原样透出；失败仍按门禁退出。"""
+        r = subprocess.run([objcopy, *args], capture_output=True, text=True,
+                           shell=False, env=env)
+        if r.returncode != 0:
+            sys.stderr.write(r.stderr or "")
+            raise SystemExit(r.returncode)
+        for line in (r.stderr or "").splitlines():
+            if "empty loadable segment detected" not in line:
+                print(line)
+
     offset = bootloader_offset()
     if RAM_ONLY_HW:
         # 全 RAM 布局：没有 .irom_text（代码并入 IRAM 的 .iram_text），
@@ -249,10 +274,9 @@ def main():
         for stale in (IROM_BIN, FLASH_IMG):
             if os.path.isfile(stale):
                 os.remove(stale)
-        subprocess.run([objcopy, ELF, BOOT_ELF], check=True, shell=False, env=env)
+        run_objcopy([ELF, BOOT_ELF])
     else:
-        subprocess.run([objcopy, "--remove-section=.irom_text", ELF, BOOT_ELF],
-                       check=True, shell=False, env=env)
+        run_objcopy(["--remove-section=.irom_text", ELF, BOOT_ELF])
     subprocess.run([sys.executable, "-m", "esptool", "--chip", "esp32s3", "elf2image",
                     fs + "mode", "dio",
                     fs + "freq", "80m",

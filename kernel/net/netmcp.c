@@ -87,6 +87,8 @@ static int g_have_cursor;
 
 static uint32_t g_rx_msg, g_tx_msg, g_reqs, g_dups, g_replays, g_resyncs;
 static uint32_t g_hellos, g_bad, g_gaps, g_trunc, g_ack_advances;
+static uint32_t g_peer_reject; /* P0-5：源地址不在固定 peer 上的报文数 */
+static uint32_t g_remote_write; /* P1-6：远程写工具授权（默认 0=只读） */
 static uint32_t g_last_hello_ms, g_last_replay_ms;
 static uint32_t g_send_fail;      /* netmcp_send 失败次数（转义/超长/发送失败） */
 static int g_link;
@@ -625,10 +627,16 @@ static void netmcp_handle_envelope(char *msg, uint32_t len)
     if (jget_u32(msg, "ack", &ack) != 0) {
         ack = 0;
     }
-    if (ack > g_ack) {
-        g_ack = ack;
-        g_ack_advances++;
-        slot_drop_upto(ack);
+    /* P0-5：ack 只能来自当前纪元且不得超过已发响应上界。
+     * 旧口径 "ack > g_ack 即推进" 允许任意主机伪造 ack 清空重放保护。 */
+    if (ack != 0u) {
+        if (epoch != g_epoch || ack > g_tx_seq) {
+            g_bad++;
+        } else if (ack > g_ack) {
+            g_ack = ack;
+            g_ack_advances++;
+            slot_drop_upto(ack);
+        }
     }
 
     char t0 = type[0];
@@ -675,6 +683,15 @@ void netmcp_udp_rx(uint32_t src_ip, uint16_t src_port, const uint8_t *data,
         g_bad++;
         return;
     }
+    /* P0-5：UDP 通道只接受固定 peer（默认 10.0.2.2:<配置端口>，可用
+     * `netmcp peer` 改）。不再"任意源地址学习"——否则同网段任意主机
+     * 发一包就能接管会话。串口传输不走本函数。 */
+    if (g_transport == NETMCP_TRANSPORT_UDP &&
+        (src_ip != g_peer_ip || src_port != g_peer_port)) {
+        g_peer_reject++;
+        g_bad++;
+        return;
+    }
     /* 直接以 NUL 结尾解析（data 指向帧内缓冲，末尾字节未必可用） */
     static char msg[NETMCP_DGRAM_MAX + 1u];
     for (uint32_t i = 0; i < len; i++) {
@@ -683,12 +700,9 @@ void netmcp_udp_rx(uint32_t src_ip, uint16_t src_port, const uint8_t *data,
     msg[len] = '\0';
     g_rx_msg++;
 
-    /* 对端地址学习：SLIRP 下对端源地址就是回包地址 */
-    if (!g_peer_known || g_peer_ip != src_ip || g_peer_port != src_port) {
-        g_peer_ip = src_ip;
-        g_peer_port = src_port;
+    /* peer 首次出现只做状态确认（地址/端口已固定，不覆盖配置） */
+    if (!g_peer_known) {
         g_peer_known = 1;
-        g_peer_configured = 1;
         potato_printf("[POTATO][NETMCP] peer %u.%u.%u.%u:%u epoch=%u\r\n",
                       (unsigned)(src_ip >> 24), (unsigned)((src_ip >> 16) & 0xFFu),
                       (unsigned)((src_ip >> 8) & 0xFFu), (unsigned)(src_ip & 0xFFu),
@@ -771,7 +785,13 @@ static void netmcp_handle_req(uint32_t epoch, uint32_t seq, const char *msg)
     /* 执行：把响应捕获进重放槽（抽头→netmcp_line_complete 负责发回） */
     uint32_t before = g_tx_seq;
     g_in_remote_req = 1;
-    mcp_handle_line(body);
+    /* P1-6：串口是物理隔离的可信入口（真机控制面），UDP 默认只读；
+     * 写工具需本地控制台 `netmcp rw on` 显式授权。 */
+    uint32_t mflags = MCP_FLAG_REMOTE;
+    if (g_transport == NETMCP_TRANSPORT_SERIAL || g_remote_write != 0u) {
+        mflags |= MCP_FLAG_REMOTE_WRITE;
+    }
+    mcp_handle_line_ex(body, mflags);
     g_in_remote_req = 0;
     if (g_tx_seq == before) {
         /* 该请求没有产生 {"jsonrpc"} 响应行：给出错误回执，保证对端不悬等 */
@@ -876,6 +896,8 @@ static void netmcp_reset_state(void)
     g_have_cursor = 0;
     g_peer_known = 0;
     g_ser_pending_valid = 0;
+    g_peer_reject = 0;
+    g_remote_write = 0;
 }
 
 void netmcp_init(void)
@@ -1034,6 +1056,20 @@ void netmcp_set_peer(uint32_t ip, uint16_t port)
                   (unsigned)g_peer_port, (unsigned)g_udp_port);
 }
 
+/* P1-6：远程写工具授权（UDP 通道；串口始终允许）。默认关闭，重启后
+ * 回到只读——遥控写权限必须是每次上电的显式决定。 */
+void netmcp_set_remote_write(int on)
+{
+    g_remote_write = (on != 0) ? 1u : 0u;
+    potato_printf("[POTATO][NETMCP] remote write %s\r\n",
+                  g_remote_write != 0u ? "enabled" : "disabled");
+}
+
+int netmcp_remote_write(void)
+{
+    return (int)g_remote_write;
+}
+
 uint32_t netmcp_epoch(void)
 {
     return g_epoch;
@@ -1065,6 +1101,7 @@ uint32_t netmcp_stat(int which)
     case 10: return g_tx_seq;
     case 11: return slots_pending();
     case 12: return g_trunc;
+    case 13: return g_peer_reject;
     default: return 0;
     }
 }
@@ -1102,12 +1139,13 @@ void netmcp_dump(void)
                   g_peer_known, g_link, (unsigned)g_epoch);
     potato_printf("[POTATO][NETMCP] rx=%u tx=%u req=%u dup=%u replay=%u "
                   "resync=%u hello=%u bad=%u gaps=%u ack=%u cursor=%u "
-                  "txseq=%u pending=%u trunc=%u\r\n",
+                  "txseq=%u pending=%u trunc=%u reject=%u rw=%u\r\n",
                   (unsigned)g_rx_msg, (unsigned)g_tx_msg, (unsigned)g_reqs,
                   (unsigned)g_dups, (unsigned)g_replays, (unsigned)g_resyncs,
                   (unsigned)g_hellos, (unsigned)g_bad, (unsigned)g_gaps,
                   (unsigned)g_ack, (unsigned)g_peer_seq, (unsigned)g_tx_seq,
-                  (unsigned)slots_pending(), (unsigned)g_trunc);
+                  (unsigned)slots_pending(), (unsigned)g_trunc,
+                  (unsigned)g_peer_reject, (unsigned)g_remote_write);
     potato_printf("[POTATO][NETMCP] tap lines=%u filtered=%u long=%u "
                   "sendfail=%u maxbody=%u maxdgram=%u\r\n",
                   (unsigned)g_resp_lines, (unsigned)g_tap_filtered,

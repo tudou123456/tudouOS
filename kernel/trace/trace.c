@@ -65,22 +65,19 @@ int trace_is_important(uint16_t type)
     }
 }
 
-/* 抬到 INTLEVEL=1（若当前不低于 1/EXCM 则原样返回，绝不降级） */
+/* P0-3/P1-2：写者横跨任务态、level-1 tick、level-2 UART/EMAC ISR，且
+ * SMP 下两核都可能写——本核 rsil1 不是互斥。统一用跨核自旋锁；
+ * 加锁函数保存/恢复完整 PS，不会在更高 INTLEVEL/EXCM 现场降级。 */
+static pot_lock_t g_trace_lock;
+
 static inline uint32_t trace_lock(void)
 {
-    uint32_t ps;
-    asm volatile("rsr.ps %0" : "=r"(ps));
-    if ((ps & 0xFu) < 1u) {
-        asm volatile("rsil %0, 1" : "=r"(ps) :: "memory");
-    }
-    return ps;
+    return pot_lock_acquire(&g_trace_lock);
 }
 
 static inline void trace_unlock(uint32_t ps)
 {
-    if ((ps & 0xFu) < 1u) { /* 只有我们抬过才需要还原 */
-        asm volatile("wsr.ps %0\n\tesync" :: "r"(ps) : "memory");
-    }
+    pot_lock_release(&g_trace_lock, ps);
 }
 
 void trace_init(void)

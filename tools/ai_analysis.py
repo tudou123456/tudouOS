@@ -41,6 +41,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 EV_PREFIX = "[POTATO][TRJ] "
@@ -754,8 +755,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     report = build_report(model, findings, opt)
 
     if opt.json_out:
-        with open(opt.json_out, "w", encoding="utf-8") as fh:
-            json.dump(report, fh, ensure_ascii=False, indent=2)
+        Path(opt.json_out).write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     if opt.quiet:
         print(json.dumps(report, ensure_ascii=False))
     else:

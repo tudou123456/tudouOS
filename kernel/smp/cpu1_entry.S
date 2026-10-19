@@ -38,20 +38,22 @@ _cpu1_entry:
     movi    a2, 1
     wur     a2, threadptr
 
-    /* 3) 换到内核给 CPU1 的独立栈（ROM 栈不可信） */
+    /* 3) 窗口状态归零：ROM 用 callx8 进入，WINDOWBASE/START 是 ROM 现场。
+     *    P2-2：必须在写 a1 之前归零——WINDOWBASE≠0 时 a1 会落到旋转后的
+     *    物理寄存器，换栈写丢。内核全程 call0 ABI（只用 a0-a15，不旋转
+     *    窗口），归零后 a1 才是真正的栈指针。 */
+    movi    a2, 0
+    wsr     a2, windowbase       /* 先归零旋转基准，WINDOWSTART 写才是窗口 0 */
+    movi    a2, 1
+    wsr     a2, windowstart
+    isync
+
+    /* 4) 换到内核给 CPU1 的独立栈（ROM 栈不可信） */
     movi    a1, pot_cpu1_stack_top
 
     /* 真机带板标记 'a'：栈切换完成（TUDOU_BOOT_TRACE=1 才真正输出） */
     movi    a2, 0x61
     call0   pot_boot_mark
-
-    /* 4) 窗口状态归零：ROM 用 callx8 进入，WINDOWBASE/START 是 ROM 现场；
-     *    内核全程 call0 ABI，只用 a0-a15（不旋转窗口），归零避免窗口
-     *    上溢/下溢异常。 */
-    movi    a2, 1
-    wsr     a2, windowstart
-    movi    a2, 0
-    wsr     a2, windowbase
 
     /* 5) 装内核异常/中断向量表（CPU0 在 boot.S 里装同一张） */
     movi    a2, pot_vectors

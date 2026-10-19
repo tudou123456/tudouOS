@@ -46,6 +46,11 @@ static uint8_t *g_heap_lo, *g_heap_hi;
 
 static pot_heap_stat_t g_stat;
 
+/* P0-3：堆是非重入多步结构，单核 rsil1 在 SMP 下不是互斥 */
+static pot_lock_t g_heap_lock;
+/* 启动时用 ccount 派生 canary 键：固定编译期常量可被构造覆盖伪造 */
+static uint32_t g_canary_key = H_CANARY_BASE;
+
 static inline hfoot_t *foot_of(hblock_t *b)
 {
     return (hfoot_t *)((uint8_t *)b + b->size - H_FOOT);
@@ -53,7 +58,7 @@ static inline hfoot_t *foot_of(hblock_t *b)
 
 static inline uint32_t canary_of(hblock_t *b)
 {
-    return H_CANARY_BASE ^ (uint32_t)b ^ b->size;
+    return g_canary_key ^ (uint32_t)b ^ b->size;
 }
 
 /* 桶号：floor(log2(size))-4，钳到最大桶（volatile 循环禁 loop 指令） */
@@ -165,6 +170,11 @@ void pot_heap_init(void)
     g_stat.n_fault = 0;
     g_heap_lo = (uint8_t *)lo;
     g_heap_hi = (uint8_t *)hi;
+    {
+        uint32_t cc;
+        asm volatile("rsr.ccount %0" : "=r"(cc));
+        g_canary_key = H_CANARY_BASE ^ cc ^ (uint32_t)hi;
+    }
 
     hblock_t *b = (hblock_t *)lo;
     b->magic = H_MAGIC_FREE;
@@ -191,14 +201,13 @@ void *pot_heap_alloc(uint32_t size, uint32_t tag)
         need = H_MIN_BLOCK;
     }
 
-    /* D-04：堆操作非重入（空闲表/位图/统计多步变更），v5 真抢占下
-       多任务可并发进入——临界区屏蔽 level-1 tick 抢占（UART level-2
-       不触碰堆；操作无睡眠，持锁微秒级） */
-    uint32_t ps = irq_save();
+    /* P0-3：堆操作非重入（空闲表/位图/统计多步变更）。rsil1 只屏蔽本核
+       tick，SMP 下两核会同时进入——必须是 S32C1I 跨核锁。 */
+    uint32_t ps = pot_lock_acquire(&g_heap_lock);
     hblock_t *b = find_block(need);
     if (b == 0) {
         g_stat.n_fail++;
-        irq_restore(ps);
+        pot_lock_release(&g_heap_lock, ps);
         return 0;
     }
     free_remove(b);
@@ -215,7 +224,7 @@ void *pot_heap_alloc(uint32_t size, uint32_t tag)
         g_stat.max_used = g_stat.used;
     }
     g_stat.n_alloc++;
-    irq_restore(ps);
+    pot_lock_release(&g_heap_lock, ps);
     trace_push(TR_MEM_ALLOC, b->size, tag);
     return (void *)((uint8_t *)b + H_HDR);
 }
@@ -225,12 +234,21 @@ void pot_heap_free(void *ptr)
     if (ptr == 0) {
         return;
     }
+    uint32_t ps = pot_lock_acquire(&g_heap_lock); /* P0-3：跨核互斥 */
+    /* P1-4：ptr 先做范围/对齐校验，绝不先解引用任意地址（D-05 残留） */
+    uint32_t p = (uint32_t)ptr;
+    if (g_heap_lo == 0 || p < (uint32_t)g_heap_lo + H_HDR ||
+        p > (uint32_t)g_heap_hi || (p & (H_ALIGN - 1u)) != 0u) {
+        g_stat.n_fault++;
+        pot_lock_release(&g_heap_lock, ps);
+        trace_push(TR_MEM_FAULT, 3 /* bad pointer */, p);
+        return;
+    }
     hblock_t *b = (hblock_t *)((uint8_t *)ptr - H_HDR);
 
-    uint32_t ps = irq_save(); /* D-04：与 alloc 同域的非重入多步操作 */
     if (b->magic != H_MAGIC_ALLOC) {
         g_stat.n_fault++;
-        irq_restore(ps);
+        pot_lock_release(&g_heap_lock, ps);
         trace_push(TR_MEM_FAULT, 2 /* bad-free */, b->tag);
         return; /* 非法/重复释放：吞掉并计数（DEAD 墓碑也落在此） */
     }
@@ -240,9 +258,10 @@ void pot_heap_free(void *ptr)
     if (b->size < H_MIN_BLOCK || (b->size & (H_ALIGN - 1u)) != 0u ||
         (uint8_t *)b + b->size > g_heap_hi) {
         g_stat.n_fault++;
-        trace_push(TR_MEM_FAULT, 4 /* header corrupt */, b->tag);
-        b->magic = H_MAGIC_DEAD;
-        irq_restore(ps);
+        uint32_t tag_bad = b->tag;
+        b->magic = H_MAGIC_DEAD; /* 隔离必须在持锁期内完成 */
+        pot_lock_release(&g_heap_lock, ps);
+        trace_push(TR_MEM_FAULT, 4 /* header corrupt */, tag_bad);
         return;
     }
 
@@ -296,12 +315,13 @@ void pot_heap_free(void *ptr)
 
     g_stat.used -= asize;
     g_stat.n_free++;
-    irq_restore(ps);
+    pot_lock_release(&g_heap_lock, ps);
     trace_push(TR_MEM_FREE, bsize, tag_saved);
 }
 
 void pot_heap_getstat(pot_heap_stat_t *out)
 {
+    uint32_t ps = pot_lock_acquire(&g_heap_lock); /* 快照与并发分配/释放互斥 */
     *out = g_stat;
     /* largest 实时重算：扫位图取最大非空桶首块近似（够用于度量） */
     out->largest = 0;
@@ -311,4 +331,5 @@ void pot_heap_getstat(pot_heap_stat_t *out)
             break;
         }
     }
+    pot_lock_release(&g_heap_lock, ps);
 }

@@ -36,7 +36,10 @@ SMP_SPAWN = r"\[POTATO\]\[SMP\] spawn aff=(-?\d+) n=(\d+) made=(-?\d+)\r"
 SMP_IPI = r"\[POTATO\]\[SMP\] ipi sent=(\d+) to cpu1\r"
 TASKS_SUM = (r"\[POTATO\]\[TS\] now=(\d+) switches=(\d+) bg_used=\d+/\d+ "
              r"diag wake=\d+ prem=\d+ sw=\d+ idle=\d+ drop ready=(\d+) "
-             r"sleep=(\d+) reg=(\d+)\r")
+             r"sleep=(\d+) reg=(\d+)(?: guard=(\d+))?\r")
+XSTRESS = (r"\[POTATO\]\[SMP\] xstress run=(\d+) sent=(\d+) recv=(\d+) "
+           r"drop=(\d+) msg_bad=(\d+) heap_ops=(\d+) heap_fail=(\d+) "
+           r"heap_bad=(\d+) fs_ops=(\d+) fs_fail=(\d+) fs_bad=(\d+)\r")
 
 
 def _smp_stat(ctx) -> dict:
@@ -226,6 +229,29 @@ def test_stress_stability(ctx):
     assert t["ticks"] > 0
     ctx.checks.append("stress: online=2 CPU1 ticks=%d unk=0, switches=%d, drops=0"
                       % (st["cpu"][1]["ticks"], switches))
+
+
+@hw_case("m9/xcore_stress", timeout=60)
+def test_xcore_stress(ctx):
+    """P0-3/P0-4 真机回归：双核并发 heap/fs/msg 压测，内容零损坏。"""
+    _start_cpu1(ctx)
+    ctx.send("smp stress on")
+    m = ctx.expect(r"stress start rc=(-?\d+)\r", 8.0)
+    assert int(m.group(1)) == 0, "stress start rc=%s" % m.group(1)
+    m = ctx.expect(XSTRESS, 8.0)
+    assert int(m.group(1)) == 1, "stress 未进入运行态: %s" % m.group(0)
+    time.sleep(1.5)
+    ctx.send("smp stress off")
+    m = ctx.expect(XSTRESS, 20.0)
+    (run, sent, recv, drop, msg_bad, hops, hfail, hbad,
+     fops, ffail, fbad) = [int(x) for x in m.groups()]
+    assert run == 0, "stress 未停止"
+    assert sent > 0 and recv > 0, "跨核消息未流动: sent=%d recv=%d" % (sent, recv)
+    assert msg_bad == 0, "跨核消息损坏 %d" % msg_bad
+    assert hops > 0 and hbad == 0, "跨核堆损坏 ops=%d bad=%d" % (hops, hbad)
+    assert fops > 0 and fbad == 0, "跨核文件损坏 ops=%d bad=%d" % (fops, fbad)
+    ctx.checks.append("xstress sent=%d recv=%d heap=%d fs=%d，bad 全 0"
+                      % (sent, recv, hops, fops))
 
 
 @hw_case("m9/preempt_toggle", timeout=20)

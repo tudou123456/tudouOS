@@ -76,7 +76,7 @@ void intc_init(void)
 
 void intc_irq_dispatch(unsigned level, void *frame_base)
 {
-    /* M9：追踪环是 CPU0 单写者（跨核 ring 并发由后续 spinlock 解决），
+    /* M9：追踪环是 CPU0 单写者（跨核 ring 并发由自旋锁解决），
      * CPU1 的 IPI 中断不写环，只累加 SMP 计数 */
     int on_cpu0 = (pot_smp_cpu_id() == 0u);
     if (on_cpu0) {
@@ -94,6 +94,22 @@ void intc_irq_dispatch(unsigned level, void *frame_base)
         }
         if ((active & (UINT32_C(1) << INTC_IPI_CPU_INT)) != 0u) {
             pot_smp_ipi_handler(frame_base); /* 可能切换（不返回） */
+        }
+    } else if (level == 3) {
+        /* P2-5：level-3 源（int22 SYSTIMER）当前未启用。若意外触发，
+         * 必须先屏蔽源再 rfi——否则挂起线未清会形成中断风暴。
+         * 屏蔽而非清源：清源寄存器属外设私有，未知源不能盲写。 */
+        uint32_t active = int_pending_enabled();
+        if (active != 0u) {
+            uint32_t en;
+            asm volatile("rsr.intenable %0" : "=r"(en));
+            en &= ~active;
+            asm volatile("wsr.intenable %0\n\t"
+                         "esync"
+                         :: "r"(en) : "memory");
+            if (on_cpu0) {
+                trace_push(TR_EXCEPTION, 3, active);
+            }
         }
     }
 
@@ -125,5 +141,61 @@ unsigned intc_l1_dispatch(void *frame_base)
         pot_sched_preempt_from_irq(frame_base); /* 不返回 */
     }
     return 1;
+}
+
+/* ---------- 跨核自旋锁（P0-3） ---------- */
+
+uint32_t pot_lock_acquire(pot_lock_t *lock)
+{
+    uint32_t ps;
+    asm volatile("rsil %0, 15" : "=r"(ps) :: "memory");
+    for (;;) {
+        uint32_t zero = 0u;
+        uint32_t v = 1u;
+        /* SCOMPARE1 每核私有：每次重设，锁定期间任何核都看到 1 而非 0 */
+        asm volatile("wsr.scompare1 %0\n\t"
+                     "isync"
+                     :: "r"(zero) : "memory");
+        asm volatile("s32c1i %0, %1, 0" : "+r"(v) : "r"(&lock->v) : "memory");
+        if (v == 0u) {
+            break; /* 旧值 0 = 抢到 */
+        }
+    }
+    asm volatile("memw" ::: "memory");
+    return ps;
+}
+
+void pot_lock_release(pot_lock_t *lock, uint32_t ps)
+{
+    asm volatile("memw" ::: "memory");
+    lock->v = 0u;
+    asm volatile("memw\n\t"
+                 "wsr.ps %0\n\t"
+                 "esync"
+                 :: "r"(ps) : "memory");
+}
+
+uint32_t pot_atomic_swap_zero(volatile uint32_t *p)
+{
+    uint32_t old;
+    uint32_t ps;
+    asm volatile("rsil %0, 15" : "=r"(ps) :: "memory");
+    for (;;) {
+        uint32_t v = 0u;
+        old = *p;
+        asm volatile("wsr.scompare1 %0\n\t"
+                     "isync"
+                     :: "r"(old) : "memory");
+        asm volatile("s32c1i %0, %1, 0" : "+r"(v) : "r"(p) : "memory");
+        if (v == old) {
+            break; /* 原子换出成功 */
+        }
+        /* 失败：v 是新值，重试（期间只可能被置位，不会丢失） */
+    }
+    asm volatile("memw" ::: "memory");
+    asm volatile("wsr.ps %0\n\t"
+                 "esync"
+                 :: "r"(ps) : "memory");
+    return old;
 }
 

@@ -132,8 +132,9 @@ def test_raw_frame_rpc(ctx):
     assert inner2 == inner, "同 seq 重放响应不一致（去重/重放失效）: %r vs %r" % (
         inner2, inner)
 
-    # ack 回收重放槽后再发同 seq → resync
-    ack = build_envelope("ack", 0, "", ack=11)
+    # ack 回收重放槽后再发同 seq → resync（ack 的是响应序号 resp["seq"]，
+    # 不是请求序号 11；P0-5 起内核校验 ack <= 已发响应上界）
+    ack = build_envelope("ack", 0, "", ack=resp["seq"])
     start3 = len(hw.mcp_frames)
     hw.send_raw(build_frame(ack))
     time.sleep(0.05)

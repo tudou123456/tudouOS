@@ -29,6 +29,9 @@
 
 #define MCP_CH_CAP 8u
 #define MCP_RESP_MAX 512
+/* 响应 id 渲染缓冲：64B 原始 id 最坏每个控制字符展开成 6 字节 \u00XX */
+#define MCP_ID_MAX 64u
+#define MCP_ID_JSON_MAX (MCP_ID_MAX * 6u + 4u)
 
 static pot_channel_t g_ch;
 static pot_msg_t g_ring[MCP_CH_CAP];
@@ -37,6 +40,8 @@ static volatile int g_run;
 
 static pot_task_t g_task;
 static uint32_t g_stk[1024];
+/* P1-6：当前调用来源（同步分发期间有效，单线程/单入口串行使用） */
+static uint32_t g_call_flags;
 
 void mcp_init(void)
 {
@@ -202,6 +207,12 @@ static void tool_fs_read(rbuild_t *b, const pot_json_t *params)
 
 static void tool_fs_write(rbuild_t *b, const pot_json_t *params)
 {
+    /* P1-6：远程通道默认只读；写权限必须由本地控制台显式授予 */
+    if ((g_call_flags & MCP_FLAG_REMOTE) != 0u &&
+        (g_call_flags & MCP_FLAG_REMOTE_WRITE) == 0u) {
+        b->ok = 0;
+        return;
+    }
     const pot_json_t *nm = pot_json_get(params, "name");
     const pot_json_t *dt = pot_json_get(params, "data");
     if (nm == 0 || nm->type != POT_JSON_STR || nm->str == 0 ||
@@ -252,7 +263,8 @@ typedef struct {
     int present;      /* 0 = notification（无 id，不回包） */
     int is_str;
     long num;
-    const char *str;  /* 指向请求树内字符串，生命周期随请求树 */
+    char str[MCP_ID_MAX + 1u]; /* 请求树内字符串的副本：树释放后仍可回显
+                                * （P0-1：树内指针在 pot_json_free 后即悬空） */
 } jid_t;
 
 /* 把 JSON 字符串值转义嵌入（含控制字符） */
@@ -303,9 +315,10 @@ static void render_id(const jid_t *id, char *out, uint32_t cap)
         out[3] = 'l';
         out[4] = '\0';
         return;
-    }    if (id->is_str) {
+    }
+    if (id->is_str) {
         out[0] = '"';
-        escape_into(out + 1, cap - 2, id->str != 0 ? id->str : "");
+        escape_into(out + 1, cap - 2, id->str);
         uint32_t n = 0;
         while (out[n] != '\0') {
             n++;
@@ -328,7 +341,7 @@ static void send_raw_result(const jid_t *id, const char *body_json)
     if (id != 0 && !id->present) {
         return; /* notification：不回包（id==0 仅用于 parse error 的 id:null） */
     }
-    char ids[80];
+    char ids[MCP_ID_JSON_MAX];
     render_id(id, ids, sizeof(ids));
     potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":%s}\r\n",
                   ids, body_json);
@@ -339,7 +352,7 @@ static void send_raw_error(const jid_t *id, int code, const char *msg)
     if (id != 0 && !id->present) {
         return; /* notification：不回包 */
     }
-    char ids[80];
+    char ids[MCP_ID_JSON_MAX];
     render_id(id, ids, sizeof(ids));
     potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,"
                   "\"error\":{\"code\":%d,\"message\":\"%s\"}}\r\n",
@@ -370,7 +383,7 @@ static void send_initialize(const jid_t *id)
     if (id != 0 && !id->present) {
         return;
     }
-    char ids[80];
+    char ids[MCP_ID_JSON_MAX];
     render_id(id, ids, sizeof(ids));
     potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{"
                   "\"protocolVersion\":\"2025-06-18\","
@@ -386,7 +399,7 @@ static void send_tools_list(const jid_t *id)
     if (id != 0 && !id->present) {
         return;
     }
-    char ids[80];
+    char ids[MCP_ID_JSON_MAX];
     render_id(id, ids, sizeof(ids));
     potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"tools\":[",
                   ids);
@@ -418,13 +431,13 @@ static void send_tools_call(const jid_t *id, rbuild_t *b)
         }
         char esc[2 * MCP_RESP_MAX];
         escape_into(esc, sizeof(esc), body);
-        char ids[80];
+        char ids[MCP_ID_JSON_MAX];
         render_id(id, ids, sizeof(ids));
         potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{"
                       "\"content\":[{\"type\":\"text\",\"text\":\"%s\"}]}}\r\n",
                       ids, esc);
     } else {
-        char ids[80];
+        char ids[MCP_ID_JSON_MAX];
         render_id(id, ids, sizeof(ids));
         potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{"
                       "\"content\":[{\"type\":\"text\","
@@ -448,16 +461,28 @@ static void handle_line(const char *line)
     }
 
     /* id 三态：数字/字符串原样回显；缺失 = notification，不回包 */
-    jid_t jid = { 0, 0, 0, 0 };
+    jid_t jid;
+    memset(&jid, 0, sizeof(jid));
     const pot_json_t *jid_node = pot_json_get(req, "id");
     if (jid_node != 0) {
         if (jid_node->type == POT_JSON_NUM) {
             jid.present = 1;
             jid.num = jid_node->num;
         } else if (jid_node->type == POT_JSON_STR && jid_node->str != 0) {
+            uint32_t idlen = 0;
+            while (jid_node->str[idlen] != '\0') {
+                idlen++;
+            }
+            if (idlen > MCP_ID_MAX) {
+                pot_json_free(req);
+                send_raw_error(0, -32600, "invalid request: id too long");
+                return;
+            }
             jid.present = 1;
             jid.is_str = 1;
-            jid.str = jid_node->str;
+            for (uint32_t i = 0; i <= idlen; i++) {
+                jid.str[i] = jid_node->str[i]; /* P0-1：脱离请求树复制 */
+            }
         } else {
             pot_json_free(req);
             send_raw_error(0, -32600, "invalid request: bad id"); /* id 非法 → id:null */
@@ -547,6 +572,14 @@ static void handle_line(const char *line)
 void mcp_handle_line(const char *line)
 {
     handle_line(line);
+}
+
+void mcp_handle_line_ex(const char *line, uint32_t flags)
+{
+    uint32_t prev = g_call_flags;
+    g_call_flags = flags;
+    handle_line(line);
+    g_call_flags = prev;
 }
 
 static void mcp_agent(void *arg)
