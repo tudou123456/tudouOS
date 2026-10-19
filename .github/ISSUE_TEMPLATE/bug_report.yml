@@ -1,0 +1,84 @@
+name: Bug report / 缺陷报告
+description: 可复现的缺陷（QEMU 或真机）。安全漏洞请走 SECURITY.md，不要用本模板。
+title: "[bug] "
+labels: ["bug", "needs-repro"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报告！请尽量提供**最小复现**和完整日志；缺少版本/日志的 issue 会被
+        标记 `needs-repro`。English reports are welcome.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 已搜索现有 issue，未发现重复
+          required: true
+        - label: 这不是安全漏洞（安全漏洞见 SECURITY.md）
+          required: true
+        - label: 已阅读 docs/qemu-testing.md 或 docs/hardware-bringup.md
+          required: false
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: "`info` 输出或 kernel/include/potato.h 的 POTATO_VERSION"
+      placeholder: "0.8.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: target
+    attributes:
+      label: 运行环境
+      options:
+        - QEMU (esp32s3)
+        - 真机 ESP32-S3
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: OS / Python / 工具链 / QEMU / 板卡 / Flash+PSRAM / 串口
+      placeholder: "Windows 11, Python 3.14.3, xtensa-esp-elf 13.2.0, QEMU esp_develop_9.2.2, ESP32-S3 rev v0.2 8MB PSRAM, COM3"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 构建命令、烧录方式、发送的 MCP/控制台命令；越小越好
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 现象、是否稳定复现、是否只在抢占/SMP/高负载下出现
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: |
+        请附最小日志片段（`[POTATO]` 行、`trace meta`、`tasks`、`memstat`、
+        QEMU 串口/QMP 日志）。**不要粘贴密钥、个人路径、完整 MAC**。
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 最近的 commit、`git status`、是否改过配置/时钟/工具链
+    validations:
+      required: false

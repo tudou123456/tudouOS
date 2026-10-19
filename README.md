@@ -1,5 +1,16 @@
 # tudouOS 土豆OS
 
+[![CI](https://github.com/tudou123456/tudouOS/actions/workflows/ci.yml/badge.svg)](https://github.com/tudou123456/tudouOS/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/tudou123456/tudouOS?include_prereleases&label=release)](https://github.com/tudou123456/tudouOS/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**简体中文** | [English](README.en.md)
+
+> **v0.8.0 Technical Preview（技术预览）**：内核功能与真机链路已跑通，但
+> 尚未达到生产级稳定性；API/命令/协议可能随版本调整。首发范围、已知限制
+> 与升级注意见 [v0.8.0 发布说明](docs/release-notes-v0.8.0.md) 和
+> [路线图](docs/ROADMAP.md)。
+
 面向 **ESP32-S3** 的自研嵌入式操作系统：自研土豆内核（C + Xtensa 汇编），
 研发检验全程跑在 QEMU（乐鑫官方分支，`-machine esp32s3`），由 Python
 QMP 测试台自动验收；`--platform hw` 产出全 RAM 单镜像，已用 esptool
@@ -43,7 +54,7 @@ third_party/     本地工具链与 QEMU（不入库）
 
 ```bash
 python tools/check_env.py      # 体检：交叉编译器 / esptool / QEMU
-python -m pip install esptool  # 缺 esptool 时
+python -m pip install -r tools/requirements.txt  # esptool/pyserial（固定版本）
 ```
 
 三件套的获取（check_env 缺什么会打印对应下载地址）：
@@ -53,7 +64,13 @@ python -m pip install esptool  # 缺 esptool 时
 2. **QEMU** `qemu-system-xtensa`：乐鑫 QEMU fork 的 Windows 包
    （qemu-xtensa-softmmu-*-x86_64-w64-mingw32.tar.xz），解压到
    `third_party/qemu/` 任意子目录。
-3. **esptool**：`pip install esptool`。
+3. **esptool**：`pip install -r tools/requirements.txt`。
+
+也可用一条命令自动下载并校验工具链/QEMU（Windows x64、固定 SHA256）：
+
+```bash
+python tools/fetch_deps.py
+```
 
 也可用环境变量 `TUDOU_CC` / `TUDOU_QEMU` 直接指定可执行文件路径。
 若 QEMU 包不可用，WSL2 里跑 QEMU、Windows 跑测试台亦可（全走 TCP）。
@@ -80,7 +97,7 @@ esptool --chip esp32s3 --port COMx --baud 921600 \
 ```
 
 - 只需烧 **一段**（`0x0`，S3 二级引导偏移），约 89KB；构建结束会打印地址与大小。
-- 串口 115200-8N1；启动后应看到 `banner v0.7.0` 和 `[POTATO] READY`。
+- 串口 115200-8N1；启动后应看到 `banner v0.8.0` 和 `[POTATO] READY`。
 - 调试启动阶段可在构建时加 `TUDOU_BOOT_TRACE=1`（串口打阶段字符
   `S/T/U/W/C/D/V` 与 `0..E`）；改该变量后需 `--clean`。
 - `--platform hw --xip` 保留旧的 flash XIP 两段烧录实验路径
@@ -204,6 +221,19 @@ open_eth** 下有效（S3 真机无内部 EMAC）；真机远程 MCP 走串口�
   差分）。审计清单见
   [docs/audit-report-2026-10-19.md](docs/audit-report-2026-10-19.md) 与
   [docs/defect-report.md](docs/defect-report.md) 的 2026-10-19 修复批次。
+
+## 开源与参与
+
+- **许可证**：[MIT](LICENSE)。内核为自研代码，未包含第三方 RTOS 源码；
+  工具链/QEMU 由 `tools/fetch_deps.py` 单独下载，遵循各自许可证。
+- **参与**：[CONTRIBUTING.md](CONTRIBUTING.md)（构建/测试/提交规范）、
+  [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)、
+  [SECURITY.md](SECURITY.md)（漏洞请走私密报告，不要开公开 issue）。
+- **路线**：[docs/ROADMAP.md](docs/ROADMAP.md)（v0.8 预览 → v0.9 长稳/网络
+  → v1.0 生产基线）；[CHANGELOG.md](CHANGELOG.md) 记录每个预览版的变化。
+- **本次发布**：[v0.8.0 发布说明](docs/release-notes-v0.8.0.md)、
+  [发布门禁证据](docs/release-gate-2026-10-19.md)、
+  [独立审计报告](docs/audit-report-2026-10-19.md)。
 
 ## 常见问题
 

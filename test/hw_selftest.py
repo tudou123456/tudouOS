@@ -32,7 +32,7 @@ BOOT = (
     "[POTATO] hw rtc-cntl: swd-conf=0x80000000 (want bit30)\r\r\n"
     "[POTATO] hw timebase calibrated: cpu=19000000Hz tick_period=19000cc\r\r\n"
     "\r\r\n"
-    "[POTATO] tudouOS v0.7.0 (potato kernel) on ESP32-S3\r\r\n"
+    "[POTATO] tudouOS v0.8.0 (potato kernel) on ESP32-S3\r\r\n"
     "[POTATO] build Oct 19 2026 19:29:00\r\r\n"
     "[POTATO] mem iram=0x40380000-0x40388000 irom(flash)=0x42000020-0x42000000 "
     "data=0x3fca8000-0x3fcb0000 bss=0x3fcb0000-0x3fcc0000\r\r\n"
@@ -144,7 +144,7 @@ def _reply(line: str) -> str:
     if line == "ping":
         return "pong\r\n"
     if line == "info":
-        return ("[POTATO] info: tudouOS v0.7.0 kernel=potato target=ESP32-S3\r\n")
+        return ("[POTATO] info: tudouOS v0.8.0 kernel=potato target=ESP32-S3\r\n")
     if line == "tickstat":
         return ("[POTATO][TICK] ticks=42 cpu_hz=19000000 now_us=0x2a "
                 "jit_min=843us jit_max=45169us uart_irq=7 rx_bytes=99\r\n")

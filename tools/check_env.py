@@ -43,7 +43,8 @@ def main():
         failures += 1
         print(f"{MISS} 交叉编译器 xtensa-esp-elf-gcc 未找到")
         print(f"      下载: {envlib.TOOLCHAIN_URL}")
-        print(f"      解压到 third_party/toolchain/ 下即可（或设置 TUDOU_CC）")
+        print(f"      推荐: python tools/fetch_deps.py（按固定 SHA256 自动下载/解压）")
+        print(f"      或解压到 third_party/toolchain/ 下（或设置 TUDOU_CC）")
 
     # 2. esptool
     if envlib.esptool_module():
@@ -68,7 +69,8 @@ def main():
         failures += 1
         print(f"{MISS} qemu-system-xtensa 未找到")
         print(f"      下载: {envlib.QEMU_URL}")
-        print(f"      解压到 third_party/qemu/ 下即可（或设置 TUDOU_QEMU）")
+        print(f"      推荐: python tools/fetch_deps.py（按固定 SHA256 自动下载/解压）")
+        print(f"      或解压到 third_party/qemu/ 下（或设置 TUDOU_QEMU）")
 
     print("-" * 60)
     if failures == 0:
