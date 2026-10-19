@@ -221,13 +221,17 @@ stack=0x3fcc5d90-0x3fcc9d90 heap=0x3fcc9d90-0x3fcdc700`。
   （`build/_final_hw_selftest2.log`）→ 全量回归 **70 PASS / 0 FAIL / 0 TIMEOUT /
   2 SKIP / 未执行 0，exit 0**（`build/_final_hw_runner4.log`）；同一源码 QEMU
   全量 **67/67**、exit 0（`build/_final_qemu_runner3.log`）。
-- **审计修复后最终验收（2026-10-19 22:31）**：`--platform hw --clean` 重建
-  （`potato_boot_hw.bin` 91376 B）→ `esptool write-flash 0x0` → Hash verified →
-  真机全量 **74 例 72 PASS / 0 FAIL / 0 TIMEOUT / 2 SKIP，exit 0**
-  （`build/_final_hw_run2.log`）；QEMU 全量 **69/69 两连绿**
-  （`build/_gate_qemu_run1.log`、`build/_gate_qemu_run2.log`）。完整门禁证据见
-  [release-gate-2026-10-19.md](release-gate-2026-10-19.md)（归档目录
-  `test/logs/gate-2026-10-19/`，含固件 SHA256 与日志清单）。
+- **审计修复后中间验收（v0.7.0，2026-10-19 22:31）**：`--platform hw --clean`
+  重建（`potato_boot_hw.bin` 91376 B）→ 真机全量 74 例 **72 PASS / 0 FAIL /
+  0 TIMEOUT / 2 SKIP**；QEMU 69/69 两连绿。证据见
+  [release-gate-2026-10-19.md](release-gate-2026-10-19.md)。
+- **v0.8.0 发布验收（2026-10-19 23:22，Technical Preview）**：同一源码 +
+  版本号 0.8.0 → `potato_boot_hw.bin` **91,376 B**，
+  SHA256 `90a58acb98333c189b1494a6acedeab901a7d224894cb50887cbf3c8c077e8e0`，
+  启动身份 `tudouOS v0.8.0 / build 23:22:06`，烧录 `Hash of data verified`；
+  真机全量 **74 例 72 PASS / 0 FAIL / 0 TIMEOUT / 2 SKIP**，QEMU **69/69 两连绿**。
+  完整门禁证据见 [release-gate-v0.8.0.md](release-gate-v0.8.0.md)（归档
+  `test/logs/gate-v0.8.0/`）。
 - 顺带修复：`kernel/mcp/mcp.c::send_initialize()` 响应多一个 `}` 的既有 bug
   （initialize 响应原为非法 JSON；对 UDP/串口通道均生效）；`test_obs.py`
   `test_obs_panic_dump` 的半行快照 flake（分析器改喂最后一个完整行）。

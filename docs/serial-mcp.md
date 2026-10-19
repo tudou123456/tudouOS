@@ -251,14 +251,15 @@ py -3.14 -m test.hw_runner --port COM3 --smoke       # 9 条冒烟
 py -3.14 -m test.hw_runner --port COM3 --keep-going  # 全量回归
 ```
 
-**当前固件（2026-10-19 审计修复后）**：74 例 **72 PASS / 0 FAIL / 0 TIMEOUT /
-2 显式 SKIP**，exit 0（`build/_final_hw_run2.log`）；同一源码 QEMU 全量
-**69/69 两连绿**（`build/_gate_qemu_run1.log`、`build/_gate_qemu_run2.log`）。
-完整门禁证据（固件 SHA256 / 两轮 QEMU / 真机原始日志清单）见
-[release-gate-2026-10-19.md](release-gate-2026-10-19.md)。
+**当前固件（v0.8.0，2026-10-19 23:22）**：`potato_boot_hw.bin` 91,376 B，
+SHA256 `90a58acb98333c189b1494a6acedeab901a7d224894cb50887cbf3c8c077e8e0`，
+`Hash of data verified`；74 例 **72 PASS / 0 FAIL / 0 TIMEOUT / 2 显式 SKIP**，
+exit 0；同一源码 QEMU 全量 **69/69 两连绿**。完整门禁证据见
+[release-gate-v0.8.0.md](release-gate-v0.8.0.md)。
 历史基线（审计前）：旧固件 `19:43:33` 与 K1/K2 修复固件 `20:21:35` 两轮均为
 **70 PASS / 0 FAIL / 2 SKIP**（`build/_hw_full2.log`、`build/_hw_full3.log`，
-smoke 9/9 `build/_hw_smoke3.log`）。
+smoke 9/9 `build/_hw_smoke3.log`）；审计修复批（v0.7.0）见
+[release-gate-2026-10-19.md](release-gate-2026-10-19.md)。
 2 条 SKIP 是平台手段差异、均有替代覆盖证据：
 (1) `m35/disconnect_heal` 需要 QMP 冻结 CPU，真机无 QMP；
 (2) `m5/xip` 为 QEMU flash 原地执行布局，真机为全 RAM 布局。

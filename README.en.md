@@ -40,9 +40,9 @@ drive the device over UART or Ethernet.
 | --- | --- |
 | QEMU full regression (69 cases, two consecutive rounds) | **69/69, 69/69** |
 | ESP32-S3 hardware regression (74 cases) | **72 PASS / 0 FAIL / 0 TIMEOUT / 2 SKIP** |
-| Firmware | 91,376 B, SHA256 `47d4af9e…f8a1c`, `Hash of data verified` |
+| Firmware | 91,376 B, SHA256 `90a58acb…e8e0`, `Hash of data verified` |
 
-Evidence: [release gate report](docs/release-gate-2026-10-19.md),
+Evidence: [v0.8.0 release gate report](docs/release-gate-v0.8.0.md),
 [independent audit](docs/audit-report-2026-10-19.md) and
 [defect report](docs/defect-report.md). The two hardware SKIPs are platform
 limitations (QMP freeze, QEMU-only XIP layout) with substitute coverage.

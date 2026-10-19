@@ -216,7 +216,7 @@ open_eth** 下有效（S3 真机无内部 EMAC）；真机远程 MCP 走串口�
   计数必须为 0。
 - **发布门禁**：QEMU 全量 **连续两轮** 69/69 全绿 + 真机全量 72 PASS/0 FAIL/
   2 SKIP；完整门禁证据（固件 SHA256、两轮 QEMU、真机原始日志与清单）见
-  [docs/release-gate-2026-10-19.md](docs/release-gate-2026-10-19.md)。测试用例
+  [docs/release-gate-v0.8.0.md](docs/release-gate-v0.8.0.md)。测试用例
   不再依赖"流量结束后立刻 dump"的时序（trace 断言改用 `trace meta` 累计计数
   差分）。审计清单见
   [docs/audit-report-2026-10-19.md](docs/audit-report-2026-10-19.md) 与
@@ -232,7 +232,7 @@ open_eth** 下有效（S3 真机无内部 EMAC）；真机远程 MCP 走串口�
 - **路线**：[docs/ROADMAP.md](docs/ROADMAP.md)（v0.8 预览 → v0.9 长稳/网络
   → v1.0 生产基线）；[CHANGELOG.md](CHANGELOG.md) 记录每个预览版的变化。
 - **本次发布**：[v0.8.0 发布说明](docs/release-notes-v0.8.0.md)、
-  [发布门禁证据](docs/release-gate-2026-10-19.md)、
+  [v0.8.0 发布门禁证据](docs/release-gate-v0.8.0.md)、
   [独立审计报告](docs/audit-report-2026-10-19.md)。
 
 ## 常见问题

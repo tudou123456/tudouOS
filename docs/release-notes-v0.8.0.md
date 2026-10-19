@@ -2,10 +2,10 @@
 
 - 发布日期：2026-10-19
 - 版本：`0.8.0`（技术预览；不建议直接用于生产）
-- 基线：`main` 分支提交 `53d3038`（第 8 批：独立审计收口）
-- 证据：[发布门禁报告](release-gate-2026-10-19.md) ·
+- 基线：审计修复 `53d3038`（第 8 批）+ 发布准备 `9e8c8ee`；tag `v0.8.0`
+- 证据：[v0.8.0 发布门禁报告](release-gate-v0.8.0.md) ·
   [独立审计报告](audit-report-2026-10-19.md) ·
-  [缺陷报告 §12](defect-report.md#12-2026-10-19-独立审计修复批次第-8-批)
+  [缺陷报告](defect-report.md)（§12 第 8 批）
 
 ---
 
@@ -59,7 +59,7 @@ SMP 假锁）与 potfs 读侧 UAF、UDP 无鉴权等全部修复；另有 P1/P2/
 | --- | --- |
 | QEMU 全量（69 例，连续两轮） | **69/69、69/69** |
 | 真机全量（74 例，COM3） | **72 PASS / 0 FAIL / 0 TIMEOUT / 2 SKIP** |
-| 真机固件 | 91,376 B，SHA256 `47d4af9e5d59e41ae404ed3a04bb6764cd39c12574b3df70b3064c4dd19f8a1c` |
+| 真机固件 | 91,376 B，SHA256 `90a58acb98333c189b1494a6acedeab901a7d224894cb50887cbf3c8c077e8e0` |
 | 烧录校验 | `Hash of data verified` |
 | 工具链 | xtensa-esp-elf-gcc 13.2.0 / QEMU esp_develop_9.2.2 / esptool 5.4.0 |
 

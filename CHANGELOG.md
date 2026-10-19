@@ -70,10 +70,11 @@
 | --- | --- |
 | QEMU 全量（69 例，连续两轮） | 69/69、69/69 |
 | 真机全量（74 例） | 72 PASS / 0 FAIL / 0 TIMEOUT / 2 SKIP |
-| 固件 | 91,376 B，SHA256 `47d4af9e…f8a1c`，烧录 Hash verified |
+| 固件 | 91,376 B，SHA256 `90a58acb…e8e0`（v0.8.0），烧录 Hash verified |
 
-证据：[docs/release-gate-2026-10-19.md](docs/release-gate-2026-10-19.md)、
-[docs/audit-report-2026-10-19.md](docs/audit-report-2026-10-19.md)。
+证据：[docs/release-gate-v0.8.0.md](docs/release-gate-v0.8.0.md)、
+[独立审计](docs/audit-report-2026-10-19.md)；
+历史审计修复批门禁见 [docs/release-gate-2026-10-19.md](docs/release-gate-2026-10-19.md)。
 
 ### Compatibility / upgrade notes
 

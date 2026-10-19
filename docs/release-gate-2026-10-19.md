@@ -1,5 +1,10 @@
 # tudouOS 发布门禁验收报告（2026-10-19）
 
+> **历史说明**：本报告对应 **v0.7.0 审计修复批**（commit `53d3038`，
+> 固件 SHA256 `47d4af9e…f8a1c`）。**v0.8.0 正式发布门禁**见
+> [release-gate-v0.8.0.md](release-gate-v0.8.0.md)（固件
+> `90a58acb…e8e0`，版本号 0.8.0）。
+
 - 验收对象：`D:\公司软件\tudouOS`，分支 **`audit-fixes-2026-10-19`**，
   提交 **`53d3038c487af124355c5a7394666739fce566a4`**（第 8 批，44 files，
   1858 insertions / 362 deletions）

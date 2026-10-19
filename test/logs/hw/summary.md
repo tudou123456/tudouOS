@@ -2,15 +2,15 @@
 
 - 日期：2026-10-19（v0.8.0 Technical Preview 发布门禁）
 - 固件：`build/potato_boot_hw.bin`，**91,376 B**，全 RAM 布局
-  - SHA256：`47d4af9e5d59e41ae404ed3a04bb6764cd39c12574b3df70b3064c4dd19f8a1c`
-  - 启动身份：`[POTATO] build Oct 19 2026 22:31:14` / `tudouOS v0.8.0`
+  - SHA256：`90a58acb98333c189b1494a6acedeab901a7d224894cb50887cbf3c8c077e8e0`
+  - 启动身份：`[POTATO] build Oct 19 2026 23:22:06` / `tudouOS v0.8.0`
   - 烧录：`esptool write-flash 0x0` → `Hash of data verified`
 - 串口：COM3 / 115200（CH340 USB-UART）；复位：DTR=IO0、RTS=EN
 - 回归台：`test/hw_runner.py` + `test/hw_cases/`，**74 条**，逐用例复位+等 READY
 - 命令：`py -3.14 -m test.hw_runner --port COM3 --keep-going`
 - 结果：**PASS=72 / FAIL=0 / TIMEOUT=0 / SKIP=2 / 未执行 0，exit 0**
-- 原始输出：`build/_final_hw_run2.log`（本机）；完整门禁证据与哈希见
-  [docs/release-gate-2026-10-19.md](../../docs/release-gate-2026-10-19.md)
+- 原始输出：`build/_gate_hw.log`（本机）；完整门禁证据与哈希见
+  [docs/release-gate-v0.8.0.md](../../docs/release-gate-v0.8.0.md)
 
 ## 1. 按里程碑
 
@@ -51,7 +51,7 @@
 - 逐用例串口日志保存在本机 `test/logs/hw/`（gitignored，不入库）。
 - 本次同时完成 QEMU 全量 **69/69 连续两轮**；两轮 QEMU + 真机的完整门禁证据
   （日志、固件 SHA256、`SHA256SUMS`）归档在
-  `test/logs/gate-2026-10-19/`，摘要见
-  [docs/release-gate-2026-10-19.md](../../docs/release-gate-2026-10-19.md)。
+  `test/logs/gate-v0.8.0/`，摘要见
+  [docs/release-gate-v0.8.0.md](../../docs/release-gate-v0.8.0.md)。
 - 本次是 v0.8.0 Technical Preview 基线；长稳/网络对抗等未覆盖项见
   [docs/ROADMAP.md](../../docs/ROADMAP.md)。
