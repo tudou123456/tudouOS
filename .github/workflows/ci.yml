@@ -13,6 +13,14 @@ concurrency:
 permissions:
   contents: read
 
+# GitHub 的 Windows runner 控制台默认是 cp1252，tools/ 与 test/ 里的中文
+# print 会直接抛 UnicodeEncodeError（首次 CI 即栽在 fetch_deps.py）。统一
+# 强制 UTF-8，既修控制台输出，也保证 Python 默认文件编码不受宿主 locale
+# 影响。
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
 jobs:
   static:
     name: Static checks
