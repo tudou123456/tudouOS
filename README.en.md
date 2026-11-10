@@ -88,6 +88,7 @@ qemu/       interactive QEMU launcher
 - [Observability](docs/observability.md)
 - [Ethernet / networking](docs/ethernet.md)
 - [QEMU test bench](docs/qemu-testing.md)
+- [Hardware bring-up log](docs/hardware-bringup.md) (Chinese)
 - [v0.8.0 release notes](docs/release-notes-v0.8.0.md) · [Roadmap](docs/ROADMAP.md)
 - [Maintaining](docs/MAINTAINING.md)
 

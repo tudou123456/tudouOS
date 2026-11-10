@@ -90,6 +90,7 @@ qemu/       交互式 QEMU 启动器
 - [可观测体系](docs/observability.md)
 - [以太网与网络栈](docs/ethernet.md)
 - [QEMU 测试台](docs/qemu-testing.md)
+- [真机带板记录](docs/hardware-bringup.md)
 - [v0.8.0 发布说明](docs/release-notes-v0.8.0.md) · [路线图](docs/ROADMAP.md)
 - [维护与发布](docs/MAINTAINING.md)
 
