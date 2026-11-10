@@ -1,6 +1,7 @@
 # tudouOS 土豆OS
 
 [![Release](https://img.shields.io/github/v/release/tudou123456/tudouOS?include_prereleases&label=release)](https://github.com/tudou123456/tudouOS/releases)
+[![CI](https://github.com/tudou123456/tudouOS/actions/workflows/ci.yml/badge.svg)](https://github.com/tudou123456/tudouOS/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **简体中文** | [English](README.en.md)
