@@ -104,6 +104,13 @@ uint32_t netmcp_stat(int which);      /* 0rx 1tx 2req 3dup 4replay 5resync
 void netmcp_set_remote_write(int on);
 int  netmcp_remote_write(void);
 
+/* UDP 信封鉴权：32B 共享密钥的 64 位十六进制；空串=清除并回到旧行为。
+ * 配置密钥后，所有 UDP 信封必须携带 HMAC-SHA256 mac，且 `netmcp rw on`
+ * 才被允许（写权限不允许建立在无认证通道上）。 */
+int  netmcp_set_auth_key_hex(const char *hex); /* 0=ok, -1=格式错误 */
+void netmcp_clear_auth_key(void);
+int  netmcp_auth_enabled(void);
+
 /* ---- 串口 MCP 传输（真机：无 EMAC 时由 net_start 启用） ----
  * 帧：host→device = 0x02 "@@MCP <crc16> <json>\r\n"
  *     device→host = "@@MCP <crc16> <json>\r\n"（单行，≤1600B） */

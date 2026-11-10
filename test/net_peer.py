@@ -25,6 +25,8 @@
 本模块只依赖标准库。用 fake 时钟不用；所有超时用 time.monotonic。
 """
 
+import hashlib
+import hmac
 import json
 import socket
 import time
@@ -59,7 +61,7 @@ class Envelope:
 class Peer:
     """宿主侧 UDP 对端：绑定端口、收内核信封、发请求。"""
 
-    def __init__(self, bind_host="0.0.0.0", timeout=5.0):
+    def __init__(self, bind_host="0.0.0.0", timeout=5.0, key=None):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((bind_host, 0))
         self.sock.settimeout(0.2)
@@ -71,6 +73,42 @@ class Peer:
         self.seq_next = 1
         self.epoch_next = 1
         self.log = []
+        # 鉴权：key 为 32B bytes 或 64 位十六进制字符串；None=旧行为（无 mac）
+        if key is None:
+            self.key = None
+        elif isinstance(key, str):
+            self.key = bytes.fromhex(key)
+        else:
+            self.key = bytes(key)
+        if self.key is not None and len(self.key) != 32:
+            raise ValueError("Peer key 必须是 32 字节（64 位 hex）")
+        self.auth_ok = 0
+        self.auth_fail = 0
+
+    # ---- HMAC-SHA256 信封鉴权（与 kernel/net/netmcp.c 的规范化一致） ----
+    @staticmethod
+    def canonical(epoch, seq, ack, type_, body):
+        raw = body.encode("utf-8")
+        head = (f"pot=1\nepoch={int(epoch)}\nseq={int(seq)}\nack={int(ack)}\n"
+                f"type={type_}\nblen={len(raw)}\n").encode("utf-8")
+        return head + raw
+
+    def mac(self, epoch, seq, ack, type_, body):
+        if self.key is None:
+            return None
+        return hmac.new(self.key, self.canonical(epoch, seq, ack, type_, body),
+                        hashlib.sha256).hexdigest()
+
+    def verify(self, obj):
+        if self.key is None:
+            return True
+        mac = obj.get("mac")
+        if not isinstance(mac, str):
+            return False
+        want = self.mac(obj.get("epoch", 0), obj.get("seq", 0),
+                        obj.get("ack", 0), str(obj.get("type", "")),
+                        str(obj.get("body", "")))
+        return hmac.compare_digest(mac, want)
 
     # ---- 收 ----
     def recv_one(self):
@@ -85,6 +123,11 @@ class Peer:
         except Exception:  # noqa: BLE001
             self.log.append(("bad-json", data[:120]))
             return None
+        if not self.verify(obj):
+            self.auth_fail += 1
+            self.log.append(("auth-fail", obj))
+            return None
+        self.auth_ok += 1
         env = Envelope(obj, data, addr)
         self.guest_addr = addr
         self.received.append(env)
@@ -133,28 +176,31 @@ class Peer:
         return [e for e in self.received if e.type == type_]
 
     # ---- 发 ----
-    def _send(self, type_, body, seq=None, epoch=None, ack=None):
+    def _send(self, type_, body, seq=None, epoch=None, ack=None, sign=True,
+              tamper=False):
         if self.guest_addr is None:
             raise AssertionError("尚未收到内核任何报文：无法得知回包地址")
-        obj = {
-            "pot": MAGIC,
-            "epoch": self.epoch_next if epoch is None else epoch,
-            "seq": 0 if seq is None else seq,
-            "ack": self.acks_sent if ack is None else ack,
-            "type": type_,
-            "body": body,
-        }
+        e = self.epoch_next if epoch is None else epoch
+        s = 0 if seq is None else seq
+        a = self.acks_sent if ack is None else ack
+        # 字段顺序与 kernel 的严格解析一致：pot/epoch/seq/ack/type/mac?/body
+        obj = {"pot": MAGIC, "epoch": e, "seq": s, "ack": a, "type": type_}
+        if self.key is not None and sign:
+            obj["mac"] = self.mac(e, s, a, type_, body)
+        if tamper:
+            body = body + " "   # mac 已按原 body 计算：改 body 即验签失败
+        obj["body"] = body
         data = json.dumps(obj, separators=(",", ":")).encode("utf-8")
         self.sock.sendto(data, self.guest_addr)
         self.log.append(("sent", obj))
         return obj
 
-    def send_req(self, line, seq=None, epoch=None):
+    def send_req(self, line, seq=None, epoch=None, sign=True, tamper=False):
         """发一条 MCP 请求行；返回 (seq, epoch)。seq 缺省则自增。"""
         if seq is None:
             seq = self.seq_next
             self.seq_next += 1
-        self._send("req", line, seq=seq, epoch=epoch)
+        self._send("req", line, seq=seq, epoch=epoch, sign=sign, tamper=tamper)
         return seq, (self.epoch_next if epoch is None else epoch)
 
     def send_ack(self, seq):

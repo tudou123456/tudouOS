@@ -4,6 +4,7 @@
 #include "mcp.h"
 #include "net.h"
 #include "potato.h"
+#include "sha256.h"
 #include "task.h"
 #include "trace.h"
 #include "uart.h"
@@ -44,6 +45,8 @@
 #define NETMCP_SLOTS     8u      /* 响应重放槽（也是已发未确认窗口） */
 #define NETMCP_BODY_MAX  1200u   /* 单条 MCP 行上限（含转义前） */
 #define NETMCP_DGRAM_MAX 1400u   /* 单报文体上限 */
+#define NETMCP_KEY_LEN   32u     /* HMAC-SHA256 共享密钥长度 */
+#define NETMCP_MAC_HEX   64u     /* 32B 摘要的十六进制长度 */
 
 /* 串口传输帧（单行，含前缀）："@@MCP " + 4hex CRC + " " + 信封 JSON */
 #define NETMCP_SER_FRAME_MAX  1600u
@@ -89,6 +92,12 @@ static uint32_t g_rx_msg, g_tx_msg, g_reqs, g_dups, g_replays, g_resyncs;
 static uint32_t g_hellos, g_bad, g_gaps, g_trunc, g_ack_advances;
 static uint32_t g_peer_reject; /* P0-5：源地址不在固定 peer 上的报文数 */
 static uint32_t g_remote_write; /* P1-6：远程写工具授权（默认 0=只读） */
+static uint8_t  g_auth_key[NETMCP_KEY_LEN];
+static uint32_t g_auth_key_len; /* 0=未配置（UDP 兼容旧行为）；32=启用 HMAC */
+static uint32_t g_auth_ok, g_auth_bad;
+/* UDP 鉴权与请求分发共享一块 body 缓冲（两种传输互斥，不会并发）：
+ * 省下 1.2KB BSS，避免挤占 m4 门禁要求的 64KB 堆。 */
+static char g_env_body[NETMCP_BODY_MAX];
 static uint32_t g_last_hello_ms, g_last_replay_ms;
 static uint32_t g_send_fail;      /* netmcp_send 失败次数（转义/超长/发送失败） */
 static int g_link;
@@ -290,6 +299,363 @@ static uint32_t str_len(const char *s)
     return n;
 }
 
+static int str_eq(const char *a, const char *b)
+{
+    while (*a != '\0' && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+/* ---------- UDP 信封鉴权（HMAC-SHA256，串口传输不强制） ---------- */
+
+static int auth_enabled(void)
+{
+    return g_auth_key_len != 0u;
+}
+
+static void bytes_zero(uint8_t *p, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        p[i] = 0;
+    }
+}
+
+static void auth_append_u32(hmac_sha256_ctx_t *h, uint32_t v)
+{
+    char rev[10];
+    uint32_t n = 0;
+    do {
+        rev[n++] = (char)('0' + (v % 10u));
+        v /= 10u;
+    } while (v != 0u);
+    char out[10];
+    uint32_t o = 0;
+    while (n > 0u) {
+        out[o++] = rev[--n];
+    }
+    hmac_sha256_update(h, out, o);
+}
+
+static void auth_append_field(hmac_sha256_ctx_t *h, const char *name,
+                              uint32_t v)
+{
+    hmac_sha256_update(h, name, str_len(name));
+    auth_append_u32(h, v);
+    hmac_sha256_update(h, "\n", 1u);
+}
+
+/* 规范化消息：pot=1 / epoch / seq / ack / type / blen / body（原始未转义）。
+ * 字段顺序固定，避免同一信封有多种合法编码。 */
+static void auth_mac(uint32_t epoch, uint32_t seq, uint32_t ack,
+                     const char *type, const char *body, uint32_t blen,
+                     uint8_t out[32])
+{
+    hmac_sha256_ctx_t h;
+    hmac_sha256_init(&h, g_auth_key, g_auth_key_len);
+    hmac_sha256_update(&h, "pot=1\n", 6u);
+    auth_append_field(&h, "epoch=", epoch);
+    auth_append_field(&h, "seq=", seq);
+    auth_append_field(&h, "ack=", ack);
+    hmac_sha256_update(&h, "type=", 5u);
+    hmac_sha256_update(&h, type, str_len(type));
+    hmac_sha256_update(&h, "\n", 1u);
+    auth_append_field(&h, "blen=", blen);
+    hmac_sha256_update(&h, body, blen);
+    hmac_sha256_final(&h, out);
+}
+
+static void auth_hex_encode(const uint8_t *in, uint32_t n, char *out)
+{
+    static const char hx[] = "0123456789abcdef";
+    for (uint32_t i = 0; i < n; i++) {
+        out[i * 2u] = hx[in[i] >> 4];
+        out[i * 2u + 1u] = hx[in[i] & 0xFu];
+    }
+    out[n * 2u] = '\0';
+}
+
+static int auth_hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return (int)(c - '0');
+    }
+    if (c >= 'a' && c <= 'f') {
+        return (int)(c - 'a') + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return (int)(c - 'A') + 10;
+    }
+    return -1;
+}
+
+static int auth_hex_decode(const char *hex, uint8_t *out, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        int hi = auth_hex_nibble(hex[i * 2u]);
+        int lo = auth_hex_nibble(hex[i * 2u + 1u]);
+        if (hi < 0 || lo < 0) {
+            return -1;
+        }
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+/* 严格信封解析：只接受 pot/epoch/seq/ack?/type/mac?/body 的固定顺序，
+ * 拒绝重复键、未知键、尾随数据和嵌套。鉴权与分发共用这一份解析结果，
+ * 避免 jfind 在 body 里误命中同名字段造成“验签 A、执行 B”。 */
+typedef struct {
+    uint32_t pot;
+    uint32_t epoch;
+    uint32_t seq;
+    uint32_t ack;
+    char type[16];
+    uint32_t body_len;
+    char mac[NETMCP_MAC_HEX + 1u];
+    int has_mac;
+} netmcp_env_t;
+
+static const char *env_skip_ws(const char *p)
+{
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+        p++;
+    }
+    return p;
+}
+
+static int env_parse_u32(const char **pp, uint32_t *out)
+{
+    const char *p = *pp;
+    if (*p < '0' || *p > '9') {
+        return -1;
+    }
+    uint64_t v = 0;
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10u + (uint64_t)(*p - '0');
+        if (v > 0xFFFFFFFFull) {
+            return -1;
+        }
+        p++;
+    }
+    *out = (uint32_t)v;
+    *pp = p;
+    return 0;
+}
+
+static int env_parse_str(const char **pp, char *out, uint32_t cap,
+                         uint32_t *outlen, int escapes)
+{
+    const char *p = *pp;
+    if (*p != '"') {
+        return -1;
+    }
+    p++;
+    uint32_t o = 0;
+    while (*p != '\0') {
+        char c = *p++;
+        if (c == '"') {
+            out[o] = '\0';
+            *pp = p;
+            if (outlen != 0) {
+                *outlen = o;
+            }
+            return 0;
+        }
+        if (c == '\\') {
+            if (!escapes) {
+                return -1;
+            }
+            char e = *p++;
+            if (e == '"' || e == '\\' || e == '/') {
+                c = e;
+            } else if (e == 'b') {
+                c = '\b';
+            } else if (e == 'f') {
+                c = '\f';
+            } else if (e == 'n') {
+                c = '\n';
+            } else if (e == 'r') {
+                c = '\r';
+            } else if (e == 't') {
+                c = '\t';
+            } else if (e == 'u') {
+                uint32_t v = 0;
+                for (int i = 0; i < 4; i++) {
+                    int h = auth_hex_nibble(*p++);
+                    if (h < 0) {
+                        return -1;
+                    }
+                    v = (v << 4) | (uint32_t)h;
+                }
+                c = (v < 0x80u) ? (char)v : '?';
+            } else {
+                return -1;
+            }
+        }
+        if (o + 1u >= cap) {
+            return -1;
+        }
+        out[o++] = c;
+    }
+    return -1;
+}
+
+static int env_parse(const char *s, netmcp_env_t *e)
+{
+    uint8_t *raw = (uint8_t *)e;
+    bytes_zero(raw, (uint32_t)sizeof(*e));
+    const char *p = env_skip_ws(s);
+    if (*p != '{') {
+        return -1;
+    }
+    p++;
+    int stage = 0;
+    for (;;) {
+        p = env_skip_ws(p);
+        if (*p == '}') {
+            p++;
+            break;
+        }
+        if (*p != '"') {
+            return -1;
+        }
+        char key[8];
+        if (env_parse_str(&p, key, sizeof(key), 0, 0) != 0) {
+            return -1;
+        }
+        p = env_skip_ws(p);
+        if (*p != ':') {
+            return -1;
+        }
+        p = env_skip_ws(p + 1);
+        if (stage == 0 && str_eq(key, "pot")) {
+            if (env_parse_u32(&p, &e->pot) != 0) {
+                return -1;
+            }
+            stage = 1;
+        } else if (stage == 1 && str_eq(key, "epoch")) {
+            if (env_parse_u32(&p, &e->epoch) != 0) {
+                return -1;
+            }
+            stage = 2;
+        } else if (stage == 2 && str_eq(key, "seq")) {
+            if (env_parse_u32(&p, &e->seq) != 0) {
+                return -1;
+            }
+            stage = 3;
+        } else if (stage == 3 && str_eq(key, "ack")) {
+            if (env_parse_u32(&p, &e->ack) != 0) {
+                return -1;
+            }
+            stage = 4;
+        } else if ((stage == 3 || stage == 4) && str_eq(key, "type")) {
+            if (env_parse_str(&p, e->type, sizeof(e->type), 0, 0) != 0) {
+                return -1;
+            }
+            stage = 5;
+        } else if (stage == 5 && str_eq(key, "mac")) {
+            uint32_t n = 0;
+            if (env_parse_str(&p, e->mac, sizeof(e->mac), &n, 0) != 0 ||
+                n != NETMCP_MAC_HEX) {
+                return -1;
+            }
+            e->has_mac = 1;
+            stage = 6;
+        } else if ((stage == 5 || stage == 6) && str_eq(key, "body")) {
+            if (env_parse_str(&p, g_env_body, sizeof(g_env_body),
+                              &e->body_len, 1) != 0) {
+                return -1;
+            }
+            stage = 7;
+        } else {
+            return -1;
+        }
+        p = env_skip_ws(p);
+        if (*p == ',') {
+            p++;
+            continue;
+        }
+        if (*p == '}') {
+            p++;
+            break;
+        }
+        return -1;
+    }
+    p = env_skip_ws(p);
+    if (*p != '\0' || stage != 7 || e->pot != 1u) {
+        return -1;
+    }
+    return 0;
+}
+
+static int auth_verify_env(const netmcp_env_t *e)
+{
+    if (!auth_enabled()) {
+        return 1;   /* 未配置密钥：保持旧行为（文档要求生产显式启用） */
+    }
+    if (!e->has_mac) {
+        g_auth_bad++;
+        return 0;
+    }
+    uint8_t want[32];
+    uint8_t got[32];
+    auth_mac(e->epoch, e->seq, e->ack, e->type, g_env_body, e->body_len, want);
+    if (auth_hex_decode(e->mac, got, NETMCP_KEY_LEN) != 0) {
+        g_auth_bad++;
+        return 0;
+    }
+    uint8_t diff = 0;
+    for (uint32_t i = 0; i < NETMCP_KEY_LEN; i++) {
+        diff |= (uint8_t)(want[i] ^ got[i]);
+    }
+    if (diff != 0u) {
+        g_auth_bad++;
+        return 0;
+    }
+    g_auth_ok++;
+    return 1;
+}
+
+int netmcp_set_auth_key_hex(const char *hex)
+{
+    uint32_t n = (hex != 0) ? str_len(hex) : 0u;
+    if (n == 0u) {
+        netmcp_clear_auth_key();
+        return 0;
+    }
+    if (n != NETMCP_MAC_HEX) {
+        return -1;
+    }
+    uint8_t key[NETMCP_KEY_LEN];
+    if (auth_hex_decode(hex, key, NETMCP_KEY_LEN) != 0) {
+        return -1;
+    }
+    for (uint32_t i = 0; i < NETMCP_KEY_LEN; i++) {
+        g_auth_key[i] = key[i];
+    }
+    g_auth_key_len = NETMCP_KEY_LEN;
+    g_remote_write = 0;   /* 换钥即失效旧会话的写授权 */
+    g_auth_ok = 0;
+    g_auth_bad = 0;
+    return 0;
+}
+
+void netmcp_clear_auth_key(void)
+{
+    bytes_zero(g_auth_key, NETMCP_KEY_LEN);
+    g_auth_key_len = 0;
+    g_remote_write = 0;
+    g_auth_ok = 0;
+    g_auth_bad = 0;
+}
+
+int netmcp_auth_enabled(void)
+{
+    return auth_enabled() ? 1 : 0;
+}
+
 /* 把 body 按 JSON 字符串转义写入 out（不含外层引号）；返回写入长度或 -1 */
 static int jesc(const char *s, uint32_t len, char *out, uint32_t cap)
 {
@@ -368,7 +734,22 @@ static int netmcp_send(const char *type, uint32_t seq, const char *body,
     for (uint32_t i = 0; type[i] != '\0'; i++) {
         p[o++] = type[i];
     }
-    const char *bt = "\",\"body\":\"";
+    p[o++] = '"';
+    if (g_transport == NETMCP_TRANSPORT_UDP && auth_enabled()) {
+        uint8_t mac[NETMCP_KEY_LEN];
+        char mac_hex[NETMCP_MAC_HEX + 1u];
+        auth_mac(g_epoch, seq, g_peer_seq, type, body, body_len, mac);
+        auth_hex_encode(mac, NETMCP_KEY_LEN, mac_hex);
+        const char *mt = ",\"mac\":\"";
+        for (uint32_t i = 0; mt[i] != '\0'; i++) {
+            p[o++] = mt[i];
+        }
+        for (uint32_t i = 0; i < NETMCP_MAC_HEX; i++) {
+            p[o++] = mac_hex[i];
+        }
+        p[o++] = '"';
+    }
+    const char *bt = ",\"body\":\"";
     for (uint32_t i = 0; bt[i] != '\0'; i++) {
         p[o++] = bt[i];
     }
@@ -698,6 +1079,18 @@ void netmcp_udp_rx(uint32_t src_ip, uint16_t src_port, const uint8_t *data,
         msg[i] = (char)data[i];
     }
     msg[len] = '\0';
+
+    /* UDP 是唯一不可信入口：严格解析 + HMAC 校验都在任何状态变更之前。
+     * 未配置密钥时 auth_verify_env 返回 1，保持旧协议兼容；生产部署应
+     * 通过 `netmcp key <64hex>` 显式启用。 */
+    static netmcp_env_t env;
+    if (env_parse(msg, &env) != 0) {
+        g_bad++;
+        return;
+    }
+    if (!auth_verify_env(&env)) {
+        return;
+    }
     g_rx_msg++;
 
     /* peer 首次出现只做状态确认（地址/端口已固定，不覆盖配置） */
@@ -713,8 +1106,7 @@ void netmcp_udp_rx(uint32_t src_ip, uint16_t src_port, const uint8_t *data,
 
 static void netmcp_handle_req(uint32_t epoch, uint32_t seq, const char *msg)
 {
-    static char body[NETMCP_BODY_MAX];
-    int blen = jget_body(msg, body, sizeof(body));
+    int blen = jget_body(msg, g_env_body, sizeof(g_env_body));
     if (blen <= 0) {
         g_bad++;
         return;
@@ -786,12 +1178,15 @@ static void netmcp_handle_req(uint32_t epoch, uint32_t seq, const char *msg)
     uint32_t before = g_tx_seq;
     g_in_remote_req = 1;
     /* P1-6：串口是物理隔离的可信入口（真机控制面），UDP 默认只读；
-     * 写工具需本地控制台 `netmcp rw on` 显式授权。 */
+     * 写工具需本地控制台 `netmcp rw on` 显式授权。UDP 写额外受分钟
+     * 配额约束（MCP_FLAG_QUOTA，见 mcp.c::tool_fs_write）。 */
     uint32_t mflags = MCP_FLAG_REMOTE;
-    if (g_transport == NETMCP_TRANSPORT_SERIAL || g_remote_write != 0u) {
+    if (g_transport == NETMCP_TRANSPORT_SERIAL) {
         mflags |= MCP_FLAG_REMOTE_WRITE;
+    } else if (g_remote_write != 0u) {
+        mflags |= MCP_FLAG_REMOTE_WRITE | MCP_FLAG_QUOTA;
     }
-    mcp_handle_line_ex(body, mflags);
+    mcp_handle_line_ex(g_env_body, mflags);
     g_in_remote_req = 0;
     if (g_tx_seq == before) {
         /* 该请求没有产生 {"jsonrpc"} 响应行：给出错误回执，保证对端不悬等 */
@@ -898,6 +1293,7 @@ static void netmcp_reset_state(void)
     g_ser_pending_valid = 0;
     g_peer_reject = 0;
     g_remote_write = 0;
+    netmcp_clear_auth_key();
 }
 
 void netmcp_init(void)
@@ -1060,6 +1456,12 @@ void netmcp_set_peer(uint32_t ip, uint16_t port)
  * 回到只读——遥控写权限必须是每次上电的显式决定。 */
 void netmcp_set_remote_write(int on)
 {
+    if (on != 0 && g_transport == NETMCP_TRANSPORT_UDP && !auth_enabled()) {
+        g_remote_write = 0;
+        potato_printf("[POTATO][NETMCP] refuse remote write: set auth key "
+                      "first (netmcp key <64hex>)\r\n");
+        return;
+    }
     g_remote_write = (on != 0) ? 1u : 0u;
     potato_printf("[POTATO][NETMCP] remote write %s\r\n",
                   g_remote_write != 0u ? "enabled" : "disabled");
@@ -1102,6 +1504,8 @@ uint32_t netmcp_stat(int which)
     case 11: return slots_pending();
     case 12: return g_trunc;
     case 13: return g_peer_reject;
+    case 14: return g_auth_bad;
+    case 15: return g_auth_ok;
     default: return 0;
     }
 }
@@ -1146,6 +1550,11 @@ void netmcp_dump(void)
                   (unsigned)g_ack, (unsigned)g_peer_seq, (unsigned)g_tx_seq,
                   (unsigned)slots_pending(), (unsigned)g_trunc,
                   (unsigned)g_peer_reject, (unsigned)g_remote_write);
+    potato_printf("[POTATO][NETMCP] auth=%s ok=%u bad=%u quota=%u wdeny=%u\r\n",
+                  auth_enabled() ? "hmac-sha256" : "off",
+                  (unsigned)g_auth_ok, (unsigned)g_auth_bad,
+                  (unsigned)mcp_write_quota(),
+                  (unsigned)mcp_write_quota_denied());
     potato_printf("[POTATO][NETMCP] tap lines=%u filtered=%u long=%u "
                   "sendfail=%u maxbody=%u maxdgram=%u\r\n",
                   (unsigned)g_resp_lines, (unsigned)g_tap_filtered,
@@ -1244,9 +1653,44 @@ static int netmcp_serial_selftest(void)
     return (g_ser_selftest_resp != 0u) ? 0 : -1;
 }
 
+/* SHA-256/HMAC 已知向量自检（FIPS 180-4 / RFC 4231 风格）。 */
+static int auth_crypto_selftest(void)
+{
+    static const char sha_abc[] =
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    static const char hmac_fox[] =
+        "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8";
+    static const char fox[] = "The quick brown fox jumps over the lazy dog";
+
+    uint8_t digest[NETMCP_KEY_LEN];
+    char hex[NETMCP_MAC_HEX + 1u];
+
+    sha256_ctx_t s;
+    sha256_init(&s);
+    sha256_update(&s, "abc", 3u);
+    sha256_final(&s, digest);
+    auth_hex_encode(digest, NETMCP_KEY_LEN, hex);
+    if (!str_eq(hex, sha_abc)) {
+        return -1;
+    }
+
+    hmac_sha256_ctx_t h;
+    hmac_sha256_init(&h, (const uint8_t *)"key", 3u);
+    hmac_sha256_update(&h, fox, 43u);
+    hmac_sha256_final(&h, digest);
+    auth_hex_encode(digest, NETMCP_KEY_LEN, hex);
+    if (!str_eq(hex, hmac_fox)) {
+        return -1;
+    }
+    return 0;
+}
+
 /* 自检：信封构造 + 取值往返（不依赖网络） */
 int netmcp_selftest(void)
 {
+    if (auth_crypto_selftest() != 0) {
+        return -1;
+    }
     if (g_transport == NETMCP_TRANSPORT_SERIAL) {
         return netmcp_serial_selftest();
     }

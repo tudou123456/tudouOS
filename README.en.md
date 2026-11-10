@@ -33,9 +33,11 @@ harnesses can inspect and drive the device over UART or Ethernet.
 - **Memory & storage** — TLSF-like heap with canaries/quarantine, RAM potfs
   with copy-on-write, bounded message QoS0/1/2 with retry/dedup/ack.
 - **Observability** — trace ring + reliable event ring, JSONL export, health
-  snapshots, fault injection, rule-based analysis (`tools/ai_analysis.py`).
-- **Networking** — ARP/IPv4/ICMP/UDP and remote MCP over QEMU open_eth; real
-  hardware uses the serial MCP transport (ESP32-S3 has no internal EMAC).
+  snapshots, fault injection, rule-based analysis (`tools/ai_analysis.py`),
+  long-run soak (`tools/soak.py`).
+- **Networking** — ARP/IPv4/ICMP/UDP and remote MCP over QEMU open_eth
+  (optional HMAC-SHA256 auth + write quota); real hardware uses the serial
+  MCP transport (ESP32-S3 has no internal EMAC).
 
 ## Quick start (Windows x64)
 

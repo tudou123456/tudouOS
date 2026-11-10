@@ -175,3 +175,101 @@ def test_m7_net_link_events_and_trace(ctx):
             kinds[m.group(1)] = kinds.get(m.group(1), 0) + 1
     assert kinds.get("NET_LINK", 0) >= 2, f"链路事件未进副环: {kinds}"
     assert kinds.get("MCP_RESYNC", 0) >= 1, f"重连未记 MCP_RESYNC: {kinds}"
+
+
+def test_m7_net_remote_mcp_hmac_auth(ctx):
+    """UDP 信封 HMAC：配钥后无 mac/被篡改的请求被丢，合法请求仍可用。"""
+    _boot_net(ctx)
+    key = bytes(range(32))
+    ctx.serial.send("netmcp key " + key.hex())
+    ctx.serial.expect(r"auth key set", timeout=10)
+    peer = Peer(key=key)
+    try:
+        ctx.serial.send(f"netmcp peer 10.0.2.2 {peer.port}")
+        ctx.serial.expect(r"\[POTATO\]\[NETMCP\] peer set", timeout=10)
+        hello = peer.hello(timeout=10)
+        assert hello.type == "hello", hello
+        assert peer.auth_ok >= 1, "内核 hello 未带可验证 mac"
+
+        env, _ = peer.call(mcp_request("ping", req_id=31), timeout=12)
+        assert '"pong"' in env.body, env.body[:200]
+
+        # 无 mac：内核在解析/状态变更前丢弃
+        peer.send_req(mcp_request("ping", req_id=32), seq=90, sign=False)
+        got = peer.drain(1.0)
+        assert not any(e.type == "resp" and e.seq >= 90 for e in got), got
+
+        # 有 mac 但 body 被篡改：验签失败，同样丢弃
+        peer.send_req(mcp_request("ping", req_id=33), seq=91, tamper=True)
+        got = peer.drain(1.0)
+        assert not any(e.type == "resp" and e.seq >= 91 for e in got), got
+
+        # 失败后合法请求仍工作（不是把会话打死）
+        env2, _ = peer.call(mcp_request("ping", req_id=34), timeout=12)
+        assert '"pong"' in env2.body, env2.body[:200]
+
+        # SHA-256/HMAC 已知向量自检 + dump 计数
+        ctx.serial.send("netmcp test")
+        ctx.serial.expect(r"selftest ok", timeout=10)
+        ctx.serial.send("netmcp")
+        ctx.serial.expect(r"auth=hmac-sha256", timeout=10)
+        time.sleep(0.3)
+        dump = ctx.serial.text
+        assert re.search(r"auth=hmac-sha256 ok=\d+ bad=[1-9]\d*", dump), dump[-400:]
+    finally:
+        peer.close()
+
+
+def test_m7_net_remote_write_auth_and_quota(ctx):
+    """UDP 写：无 key 拒绝授权；有 key 后按分钟配额放行/拒绝 fs.write。"""
+    _boot_net(ctx)
+    key = bytes([0xA5]) * 32
+
+    # 无 key 时不允许把只读通道升级为可写
+    ctx.serial.send("netmcp rw on")
+    ctx.serial.expect(r"refuse remote write: set auth key first", timeout=10)
+
+    ctx.serial.send("netmcp key " + key.hex())
+    ctx.serial.expect(r"auth key set", timeout=10)
+    peer = Peer(key=key)
+    try:
+        ctx.serial.send(f"netmcp peer 10.0.2.2 {peer.port}")
+        ctx.serial.expect(r"\[POTATO\]\[NETMCP\] peer set", timeout=10)
+        peer.hello(timeout=10)
+
+        ctx.serial.send("netmcp quota 2")
+        ctx.serial.expect(r"write quota=2/min", timeout=10)
+        ctx.serial.send("netmcp rw on")
+        ctx.serial.expect(r"remote write enabled", timeout=10)
+
+        def write(name, data, rid):
+            return peer.call(mcp_request(
+                "tools/call",
+                {"name": "fs.write",
+                 "arguments": {"name": name, "data": data}},
+                req_id=rid), timeout=12)[0]
+
+        e0 = write("quota0.txt", "v0", 40)
+        assert "written" in e0.body and "isError" not in e0.body, e0.body
+        e1 = write("quota1.txt", "v1", 41)
+        assert "written" in e1.body and "isError" not in e1.body, e1.body
+
+        # 第 3 次超配额：拒绝且不落盘
+        e2 = write("quota2.txt", "v2", 42)
+        assert "write quota exceeded" in e2.body, e2.body
+        assert '"isError":true' in e2.body, e2.body
+
+        # 前两个文件可读，第 3 个不存在
+        r0 = peer.call(mcp_request(
+            "tools/call", {"name": "fs.read", "arguments": {"name": "quota0.txt"}},
+            req_id=50), timeout=12)[0]
+        assert "v0" in r0.body, r0.body
+        r2 = peer.call(mcp_request(
+            "tools/call", {"name": "fs.read", "arguments": {"name": "quota2.txt"}},
+            req_id=51), timeout=12)[0]
+        assert '"isError":true' in r2.body, r2.body
+
+        ctx.serial.send("netmcp")
+        ctx.serial.expect(r"quota=2 wdeny=1", timeout=10)
+    finally:
+        peer.close()

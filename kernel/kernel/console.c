@@ -1007,6 +1007,47 @@ static void cmd_netmcp(const char *arg)
         }
         return;
     }
+    if (strcmp(sub, "key") == 0) {
+        char w[80];
+        split_word(rest, w, (int)sizeof(w));
+        if (w[0] == '\0') {
+            potato_printf("[POTATO][NETMCP] auth=%s "
+                          "(usage: netmcp key <64hex>|clear)\r\n",
+                          netmcp_auth_enabled() ? "hmac-sha256" : "off");
+            return;
+        }
+        if (strcmp(w, "clear") == 0) {
+            netmcp_clear_auth_key();
+            potato_printf("[POTATO][NETMCP] auth key cleared\r\n");
+            return;
+        }
+        if (netmcp_set_auth_key_hex(w) != 0) {
+            uart_puts("[POTATO][NETMCP] invalid key: need 64 hex chars\r\n");
+            return;
+        }
+        potato_printf("[POTATO][NETMCP] auth key set (32B); "
+                      "remote write disabled, re-enable with `netmcp rw on`\r\n");
+        return;
+    }
+    if (strcmp(sub, "quota") == 0) {
+        char w[12];
+        split_word(rest, w, (int)sizeof(w));
+        if (w[0] == '\0') {
+            potato_printf("[POTATO][NETMCP] write quota=%u/min "
+                          "(usage: netmcp quota <n>; 0=unlimited)\r\n",
+                          (unsigned)mcp_write_quota());
+            return;
+        }
+        unsigned n = parse_dec(w, 0xFFFFFFFFu);
+        if (n == 0xFFFFFFFFu) {
+            uart_puts("[POTATO][NETMCP] usage: netmcp quota <n>\r\n");
+            return;
+        }
+        mcp_set_write_quota((uint32_t)n);
+        potato_printf("[POTATO][NETMCP] write quota=%u/min\r\n",
+                      (unsigned)mcp_write_quota());
+        return;
+    }
     if (strcmp(sub, "port") == 0) {
         char w[12];
         split_word(rest, w, (int)sizeof(w));
@@ -1028,7 +1069,8 @@ static void cmd_netmcp(const char *arg)
         return;
     }
     uart_puts("[POTATO][NETMCP] usage: netmcp [dump|test|port <p>|"
-              "peer <a.b.c.d> <port>|rw on|off]\r\n");
+              "peer <a.b.c.d> <port>|rw on|off|key <64hex>|clear|"
+              "quota <n>]\r\n");
 }
 
 static void cmd_dispatch(char *line)

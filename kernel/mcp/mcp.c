@@ -29,9 +29,8 @@
 
 #define MCP_CH_CAP 8u
 #define MCP_RESP_MAX 512
-/* 响应 id 渲染缓冲：64B 原始 id 最坏每个控制字符展开成 6 字节 \u00XX */
+/* 请求 id 原始上限（字符串 id 副本；响应输出直接流式转义，不再开缓冲） */
 #define MCP_ID_MAX 64u
-#define MCP_ID_JSON_MAX (MCP_ID_MAX * 6u + 4u)
 
 static pot_channel_t g_ch;
 static pot_msg_t g_ring[MCP_CH_CAP];
@@ -42,6 +41,29 @@ static pot_task_t g_task;
 static uint32_t g_stk[1024];
 /* P1-6：当前调用来源（同步分发期间有效，单线程/单入口串行使用） */
 static uint32_t g_call_flags;
+
+#define MCP_WRITE_WINDOW_MS 60000u
+static uint32_t g_write_quota = 8u;   /* 默认 8 次/分钟 */
+static uint32_t g_write_count;
+static uint32_t g_write_window_ms;
+static uint32_t g_write_denied;
+
+void mcp_set_write_quota(uint32_t per_min)
+{
+    g_write_quota = per_min;
+    g_write_count = 0;
+    g_write_window_ms = 0;
+}
+
+uint32_t mcp_write_quota(void)
+{
+    return g_write_quota;
+}
+
+uint32_t mcp_write_quota_denied(void)
+{
+    return g_write_denied;
+}
 
 void mcp_init(void)
 {
@@ -84,6 +106,7 @@ typedef struct {
     pot_json_t *first;
     pot_json_t **tail;
     int ok;
+    const char *err;   /* 可选：失败时的具体原因（配额/权限等） */
 } rbuild_t;
 
 static pot_json_t *rnew(rbuild_t *b, const char *key)
@@ -208,10 +231,28 @@ static void tool_fs_read(rbuild_t *b, const pot_json_t *params)
 static void tool_fs_write(rbuild_t *b, const pot_json_t *params)
 {
     /* P1-6：远程通道默认只读；写权限必须由本地控制台显式授予 */
-    if ((g_call_flags & MCP_FLAG_REMOTE) != 0u &&
-        (g_call_flags & MCP_FLAG_REMOTE_WRITE) == 0u) {
-        b->ok = 0;
-        return;
+    if ((g_call_flags & MCP_FLAG_REMOTE) != 0u) {
+        if ((g_call_flags & MCP_FLAG_REMOTE_WRITE) == 0u) {
+            b->ok = 0;
+            b->err = "remote write disabled";
+            return;
+        }
+        /* UDP 通道额外受分钟配额约束；串口可信入口不置 QUOTA 位。 */
+        if ((g_call_flags & MCP_FLAG_QUOTA) != 0u) {
+            uint32_t now = pot_sched_now();
+            if (g_write_window_ms == 0u ||
+                (now - g_write_window_ms) >= MCP_WRITE_WINDOW_MS) {
+                g_write_window_ms = now;
+                g_write_count = 0;
+            }
+            if (g_write_quota != 0u && g_write_count >= g_write_quota) {
+                g_write_denied++;
+                b->ok = 0;
+                b->err = "write quota exceeded";
+                return;
+            }
+            g_write_count++;
+        }
     }
     const pot_json_t *nm = pot_json_get(params, "name");
     const pot_json_t *dt = pot_json_get(params, "data");
@@ -267,28 +308,27 @@ typedef struct {
                                 * （P0-1：树内指针在 pot_json_free 后即悬空） */
 } jid_t;
 
-/* 把 JSON 字符串值转义嵌入（含控制字符） */
-static void escape_into(char *dst, uint32_t cap, const char *s)
+/* 直接把 JSON 字符串内容转义写到 UART，避免在调用栈上再开
+ * 2*MCP_RESP_MAX 的缓冲（net 任务栈只有 2.5KB，tools/call 会击穿）。 */
+static void uart_puts_escaped(const char *s)
 {
-    uint32_t o = 0;
-    for (uint32_t i = 0; s[i] != '\0' && o + 7 < cap; i++) {
+    static const char hex[] = "0123456789abcdef";
+    for (uint32_t i = 0; s[i] != '\0'; i++) {
         char ch = s[i];
         if (ch == '"' || ch == '\\') {
-            dst[o++] = '\\';
-            dst[o++] = ch;
+            uart_putc('\\');
+            uart_putc(ch);
         } else if ((unsigned char)ch < 0x20u) {
-            static const char hex[] = "0123456789abcdef";
-            dst[o++] = '\\';
-            dst[o++] = 'u';
-            dst[o++] = '0';
-            dst[o++] = '0';
-            dst[o++] = hex[((unsigned char)ch >> 4) & 0xF];
-            dst[o++] = hex[(unsigned char)ch & 0xF];
+            uart_putc('\\');
+            uart_putc('u');
+            uart_putc('0');
+            uart_putc('0');
+            uart_putc(hex[((unsigned char)ch >> 4) & 0xF]);
+            uart_putc(hex[(unsigned char)ch & 0xF]);
         } else {
-            dst[o++] = ch;
+            uart_putc(ch);
         }
     }
-    dst[o] = '\0';
 }
 
 static void u32_to_dec(char *dst, uint32_t v)
@@ -305,62 +345,55 @@ static void u32_to_dec(char *dst, uint32_t v)
     dst[n] = '\0';
 }
 
-/* 渲染 id 片段："null" / 数字 / 带引号转义字符串 */
-static void render_id(const jid_t *id, char *out, uint32_t cap)
+/* 直接把 id 片段写到 UART："null" / 数字 / 带引号转义字符串。
+ * 避免为每个响应在栈上开 MCP_ID_JSON_MAX（388B）缓冲。 */
+static void uart_puts_id(const jid_t *id)
 {
     if (id == 0 || !id->present) {
-        out[0] = 'n';
-        out[1] = 'u';
-        out[2] = 'l';
-        out[3] = 'l';
-        out[4] = '\0';
+        uart_puts("null");
         return;
     }
     if (id->is_str) {
-        out[0] = '"';
-        escape_into(out + 1, cap - 2, id->str);
-        uint32_t n = 0;
-        while (out[n] != '\0') {
-            n++;
-        }
-        out[n] = '"';
-        out[n + 1] = '\0';
+        uart_putc('"');
+        uart_puts_escaped(id->str);
+        uart_putc('"');
         return;
     }
-    uint32_t v = (id->num < 0) ? (uint32_t)(-(id->num + 1)) + 1u : (uint32_t)id->num;
+    uint32_t v = (id->num < 0) ? (uint32_t)(-(id->num + 1)) + 1u
+                               : (uint32_t)id->num;
+    char tmp[12];
     if (id->num < 0) {
-        out[0] = '-';
-        u32_to_dec(out + 1, v);
-    } else {
-        u32_to_dec(out, v);
+        uart_putc('-');
     }
+    u32_to_dec(tmp, v);
+    uart_puts(tmp);
 }
 
-static void send_raw_result(const jid_t *id, const char *body_json)
+#define MCP_NOINLINE __attribute__((noinline))
+
+static MCP_NOINLINE void send_raw_result(const jid_t *id, const char *body_json)
 {
     if (id != 0 && !id->present) {
         return; /* notification：不回包（id==0 仅用于 parse error 的 id:null） */
     }
-    char ids[MCP_ID_JSON_MAX];
-    render_id(id, ids, sizeof(ids));
-    potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":%s}\r\n",
-                  ids, body_json);
+    potato_printf("{\"jsonrpc\":\"2.0\",\"id\":");
+    uart_puts_id(id);
+    potato_printf(",\"result\":%s}\r\n", body_json);
 }
 
-static void send_raw_error(const jid_t *id, int code, const char *msg)
+static MCP_NOINLINE void send_raw_error(const jid_t *id, int code, const char *msg)
 {
     if (id != 0 && !id->present) {
         return; /* notification：不回包 */
     }
-    char ids[MCP_ID_JSON_MAX];
-    render_id(id, ids, sizeof(ids));
-    potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,"
-                  "\"error\":{\"code\":%d,\"message\":\"%s\"}}\r\n",
-                  ids, code, msg);
+    potato_printf("{\"jsonrpc\":\"2.0\",\"id\":");
+    uart_puts_id(id);
+    potato_printf(",\"error\":{\"code\":%d,\"message\":\"%s\"}}\r\n", code, msg);
 }
 
 /* 兼容旧直连形态：result 是工具子节点链（对象） */
-static void send_tree_result(const jid_t *id, pot_json_t *result_children)
+static MCP_NOINLINE void send_tree_result(const jid_t *id,
+                                          pot_json_t *result_children)
 {
     if (id != 0 && !id->present) {
         pot_json_free(result_children); /* notification：树释放责任在此 */
@@ -378,31 +411,30 @@ static void send_tree_result(const jid_t *id, pot_json_t *result_children)
 
 /* ---------- 协议方法 ---------- */
 
-static void send_initialize(const jid_t *id)
+static MCP_NOINLINE void send_initialize(const jid_t *id)
 {
     if (id != 0 && !id->present) {
         return;
     }
-    char ids[MCP_ID_JSON_MAX];
-    render_id(id, ids, sizeof(ids));
-    potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{"
+    potato_printf("{\"jsonrpc\":\"2.0\",\"id\":");
+    uart_puts_id(id);
+    potato_printf(",\"result\":{"
                   "\"protocolVersion\":\"2025-06-18\","
                   "\"capabilities\":{\"tools\":{\"listChanged\":false}},"
                   "\"serverInfo\":{\"name\":\"%s\",\"version\":\"%s\"},"
                   "\"instructions\":\"tudouOS kernel MCP over UART lines; "
                   "filter non-JSON console lines.\"}}\r\n",
-                  ids, POTATO_NAME, POTATO_VERSION);
+                  POTATO_NAME, POTATO_VERSION);
 }
 
-static void send_tools_list(const jid_t *id)
+static MCP_NOINLINE void send_tools_list(const jid_t *id)
 {
     if (id != 0 && !id->present) {
         return;
     }
-    char ids[MCP_ID_JSON_MAX];
-    render_id(id, ids, sizeof(ids));
-    potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"tools\":[",
-                  ids);
+    potato_printf("{\"jsonrpc\":\"2.0\",\"id\":");
+    uart_puts_id(id);
+    potato_printf(",\"result\":{\"tools\":[");
     for (int i = 0; i < N_TOOLS; i++) {
         potato_printf("%s{\"name\":\"%s\",\"description\":\"%s\","
                       "\"inputSchema\":{\"type\":\"object\","
@@ -416,8 +448,10 @@ static void send_tools_list(const jid_t *id)
     potato_printf("]}}\r\n");
 }
 
-/* tools/call：工具结果序列化后按 MCP content 形态回传 */
-static void send_tools_call(const jid_t *id, rbuild_t *b)
+/* tools/call：工具结果序列化后按 MCP content 形态回传。
+ * body 仍要一块 512B 缓冲（pot_json_write 的接口），但 id/转义都流式写
+ * UART，不再叠加 388B + 1024B 的栈缓冲。 */
+static MCP_NOINLINE void send_tools_call(const jid_t *id, rbuild_t *b)
 {
     if (id != 0 && !id->present) {
         return;
@@ -429,21 +463,20 @@ static void send_tools_call(const jid_t *id, rbuild_t *b)
             send_raw_error(id, -32603, "result too large");
             return;
         }
-        char esc[2 * MCP_RESP_MAX];
-        escape_into(esc, sizeof(esc), body);
-        char ids[MCP_ID_JSON_MAX];
-        render_id(id, ids, sizeof(ids));
-        potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{"
-                      "\"content\":[{\"type\":\"text\",\"text\":\"%s\"}]}}\r\n",
-                      ids, esc);
+        potato_printf("{\"jsonrpc\":\"2.0\",\"id\":");
+        uart_puts_id(id);
+        potato_printf(",\"result\":{\"content\":[{\"type\":\"text\","
+                      "\"text\":\"");
+        uart_puts_escaped(body);
+        potato_printf("\"}]}}\r\n");
     } else {
-        char ids[MCP_ID_JSON_MAX];
-        render_id(id, ids, sizeof(ids));
-        potato_printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{"
-                      "\"content\":[{\"type\":\"text\","
-                      "\"text\":\"tool failed\"},"
+        const char *why = (b->err != 0) ? b->err : "tool failed";
+        potato_printf("{\"jsonrpc\":\"2.0\",\"id\":");
+        uart_puts_id(id);
+        potato_printf(",\"result\":{\"content\":[{\"type\":\"text\","
+                      "\"text\":\"%s\"},"
                       "{\"type\":\"text\",\"text\":\"check params\"}],"
-                      "\"isError\":true}}\r\n", ids);
+                      "\"isError\":true}}\r\n", why);
     }
 }
 
@@ -535,7 +568,7 @@ static void handle_line(const char *line)
             send_raw_error(&jid, -32602, "unknown tool");
             return;
         }
-        rbuild_t b = { 0, 0, 1 };
+        rbuild_t b = { 0, 0, 1, 0 };
         b.tail = &b.first;
         g_tools[found].fn(&b, ja); /* arguments 作为参数对象 */
         pot_json_free(req);
@@ -547,7 +580,7 @@ static void handle_line(const char *line)
     /* ---- 兼容旧直连形态：method 即工具名，params 即参数 ---- */
     for (volatile int i = 0; i < N_TOOLS; i++) {
         if (strcmp(jm->str, g_tools[i].name) == 0) {
-            rbuild_t b = { 0, 0, 1 };
+            rbuild_t b = { 0, 0, 1, 0 };
             b.tail = &b.first;
             g_tools[i].fn(&b, params);
             pot_json_free(req);

@@ -81,6 +81,10 @@ net 任务）；`g_transport` 为 SERIAL 时 `netmcp_send()` 走串口帧编码�
   不启用串口传输（保持「无网卡即停用」语义，`test_m7_nodev` 锚点不变）。
 - 两条通道同一份信封/状态机代码；主机侧 `test/net_peer.py`（UDP Peer）与
   `tools/serial_mcp.py` 是两个传输实现，信封格式相同。
+- UDP 通道可选 HMAC-SHA256 信封鉴权（`netmcp key <64hex>`）与写配额
+  （`netmcp quota <n>`）；串口是物理隔离入口，**不要求 `mac`**，也不受
+  分钟配额限制（仍受本地 `netmcp rw on` 授权约束）。串口解析会忽略
+  UDP 侧额外的 `mac` 字段。
 
 ## 5. 主机工具用法
 

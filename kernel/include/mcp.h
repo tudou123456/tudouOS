@@ -37,6 +37,13 @@ void mcp_handle_line(const char *line);
  * 都能 fs.write 等于网络一暴露就给了任意写权限。 */
 #define MCP_FLAG_REMOTE       0x1u
 #define MCP_FLAG_REMOTE_WRITE 0x2u
+/* 该调用受远程写配额约束（UDP；串口可信入口不置位）。 */
+#define MCP_FLAG_QUOTA        0x4u
 void mcp_handle_line_ex(const char *line, uint32_t flags);
+
+/* 远程写配额：每 60s 窗口最多 per_min 次 fs.write；0=不限制（显式关闭）。 */
+void mcp_set_write_quota(uint32_t per_min);
+uint32_t mcp_write_quota(void);
+uint32_t mcp_write_quota_denied(void);
 
 #endif /* TUDOU_MCP_H */

@@ -29,9 +29,10 @@ tudouOS 是面向 **ESP32-S3** 的自研嵌入式操作系统。内核从零实�
 - **内存与存储**：TLSF 类堆（canary/隔离/合并）、RAM potfs（写时复制）、
   有界消息通道（QoS0/1/2、重发、去重、回执）。
 - **可观测**：追踪环 + 重要事件副环、JSONL 导出、健康快照、故障注入、
-  规则分析工具 `tools/ai_analysis.py`。
-- **网络**：QEMU open_eth 上的 ARP/IPv4/ICMP/UDP 与远程 MCP 通道；
-  真机远程控制走串口传输（ESP32-S3 无内部 EMAC）。
+  规则分析工具 `tools/ai_analysis.py`、长稳框架 `tools/soak.py`。
+- **网络**：QEMU open_eth 上的 ARP/IPv4/ICMP/UDP 与远程 MCP 通道
+  （可选 HMAC-SHA256 鉴权 + 写配额）；真机远程控制走串口传输
+  （ESP32-S3 无内部 EMAC）。
 
 ## 快速开始（Windows x64）
 

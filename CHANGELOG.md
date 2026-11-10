@@ -3,6 +3,30 @@
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)
 与语义化版本。技术预览版可能包含不兼容调整。
 
+## [Unreleased]
+
+### Added
+
+- **UDP 远程 MCP 鉴权**：32B 共享密钥的 HMAC-SHA256 信封认证
+  （`netmcp key <64hex>`）、严格字段顺序解析；缺 mac/被篡改的报文在
+  状态变更前丢弃。串口传输不强制（物理隔离入口）。
+- **远程写配额**：UDP `fs.write` 默认 8 次/60s（`netmcp quota <n>`，
+  0=不限制）；超限返回 `isError:true` + `write quota exceeded` 且不落盘。
+  未配密钥时 `netmcp rw on` 被拒绝。
+- **`tools/soak.py`**：单实例长稳框架（QEMU/真机），周期施加堆/消息/
+  文件/调度负载，采样 `health`/`tasks`，判定复位、tick 停摆、堆泄漏、
+  看门狗、栈哨兵；输出 JSONL + summary。
+
+### Changed
+
+- net 任务栈 640 words（2.5KB）→ 2048 words（8KB）：MCP 工具执行
+  （如 `fs.write`）+ JSON 分发 + HMAC 叠加后原栈会击穿。
+
+### Fixed
+
+- 远程 `tools/call` 响应在 net 栈不足时无输出（表现为请求已执行但
+  对端超时）；栈扩容后响应稳定。
+
 ## [0.8.0] - 2026-10-19 · Technical Preview
 
 首个公开技术预览：ESP32-S3 自研内核 + 内核原生 MCP + QEMU/真机双测试台。

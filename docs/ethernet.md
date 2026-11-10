@@ -208,10 +208,12 @@ net_task_step():
 
 ### 4.1 信封
 
-每条 UDP 报文是一个手写 JSON 信封（不引第三方库，解析用最小 `jfind/jget_*`）：
+每条 UDP 报文是一个手写 JSON 信封（不引第三方库）。UDP 入口使用**严格
+解析器**（固定字段顺序、拒绝重复/未知键），分发阶段仍用最小 `jget_*`；
+串口入口沿用同一信封但跳过 HMAC。
 
 ```json
-{"pot":1,"epoch":1,"seq":3,"ack":2,"type":"resp","body":"{\"jsonrpc\":\"2.0\",...}"}
+{"pot":1,"epoch":1,"seq":3,"ack":2,"type":"resp","mac":"<64hex>","body":"{\"jsonrpc\":\"2.0\",...}"}
 ```
 
 | 字段 | 含义 |
@@ -221,13 +223,14 @@ net_task_step():
 | `seq` | 本方向序号：请求由对端分配，响应由内核 `g_tx_seq` 递增分配 |
 | `ack` | **捎带确认**：内核发出的每条报文都带 `ack=g_peer_seq`（已处理到的对端请求序号）；对端发 `ack` 类型报文时用它确认内核响应 |
 | `type` | `hello` / `req` / `ack` / `resync` / `resp` |
+| `mac` | 可选：32B 共享密钥的 HMAC-SHA256（64 位小写 hex）；配置密钥后必填，串口传输不要求 |
 | `body` | 一行 MCP JSON-RPC 文本（`hello` 是 `{"mac":"..."}`；`ack`/部分 `resync` 为空串）；转义后长度受限 |
 
 报文类型与方向：
 
 | type | 方向 | 语义 |
 |---|---|---|
-| `hello` | 内核→对端（对端→内核时仅用于地址学习） | 对端未知时每 500ms 发一次，body 带 MAC |
+| `hello` | 内核→对端（对端→内核时仅用于地址学习） | 对端未知时每 500ms 发一次，body 带网卡 MAC 地址 |
 | `req` | 对端→内核 | body 一行 JSON-RPC，内核执行后回 `resp` |
 | `resp` | 内核→对端 | body 为响应行，同时存入重放槽；未确认时 400ms 重发 |
 | `ack` | 对端→内核 | `ack=n` 累积确认响应序号 ≤n，内核回收重放槽 |
@@ -285,13 +288,41 @@ net_task_step():
 | 单条 UDP 报文 | ≤1400B | 信封（含转义）超限则发送失败并计数 |
 | UDP 端口 | 默认 47654 | `netmcp port <p>` 可改 |
 | 对端 | 默认 `10.0.2.2:47654` | 内核把它视为「已配置」，上电即尝试 hello；任何合法入站报文都会学习源地址并打印 `peer <ip>:<port> epoch=<n>` |
-| 传输 | 仅 UDP | 无 TCP；无认证/加密（测试台内网使用） |
+| 传输 | UDP / 串口 | UDP 可选 HMAC-SHA256（推荐生产开启）；无 TLS/DTLS 加密 |
+| 远程写 | 默认只读 | `netmcp rw on` 显式授权；UDP 要求先配密钥，且受分钟配额约束 |
+
+### 4.6 鉴权与写配额（UDP）
+
+UDP 入口是唯一不可信入口。配置密钥后，内核在**任何状态变更之前**做严格信封
+解析 + HMAC 校验；缺 `mac`、格式不对或摘要不符的报文直接丢弃，只增加
+`auth_bad` 计数，不回包、不执行。
+
+```text
+netmcp key <64hex>     # 设置 32B 共享密钥（64 位十六进制）；重启后需重配
+netmcp key clear       # 清除密钥并关闭远程写
+netmcp quota <n>       # fs.write 每分钟配额（默认 8；0=不限制）
+netmcp rw on|off       # UDP 必须先配密钥才允许 on
+```
+
+* **规范化消息**：`pot=1 / epoch / seq / ack / type / blen / body` 按固定顺序
+  拼接后用 HMAC-SHA256；`body` 用未转义原文，`blen` 为其字节长度。字段顺序
+  固定，避免同一信封有多种合法编码。
+* **严格解析**：只接受固定字段顺序（`pot,epoch,seq,ack?,type,mac?,body`），
+  拒绝重复键、未知键、尾随数据；解析结果同时用于鉴权和分发，避免
+  `jfind` 在 body 内误命中同名字段造成「验签 A、执行 B」。
+* **写权限**：UDP 默认只读；`netmcp rw on` 在未配密钥时被拒绝。写工具
+  （`fs.write`）在 `mcp.c` 里按 60s 窗口计数，超配额返回
+  `isError:true` + `"write quota exceeded"`，不落盘。
+* **串口传输**：物理隔离入口，不要求 `mac`，也不受分钟配额限制（仍受
+  `netmcp rw` 本地授权约束）。
+* 已知边界：这是**完整性/来源认证**，不是加密；同网段被动嗅探仍可看到
+  body 明文。需要机密性时应在外层加 TLS/DTLS 或改用串口。
 
 **为什么内核主动 hello**：QEMU SLIRP 的 `hostfwd` 只支持 TCP，主机无法主动向
 guest 的 UDP 端口发起连接；所以由内核周期发 hello/响应，主机侧 `test/net_peer.py`
 绑定自己的 UDP 端口，先收包学习 guest 地址（10.0.2.15:47654），之后反向发包。
 
-### 4.6 时序示意
+### 4.7 时序示意
 
 ```
 对端 (host)                                  内核 net 任务

@@ -18,8 +18,10 @@
 
 ## v0.9 — 长稳与网络
 
-- 48h soak、10⁷ 次上下文切换、SMP 跨核 heap/fs/msg 长稳压测。
-- UDP 远程 MCP 的 HMAC/token 鉴权与写配额；可选 TLS/DTLS 评估。
+- 48h soak、10⁷ 次上下文切换、SMP 跨核 heap/fs/msg 长稳压测
+  （框架 `tools/soak.py` 已就绪，长跑待执行）。
+- UDP 远程 MCP 的 HMAC/token 鉴权与写配额（基础版已落地：
+  HMAC-SHA256 + 分钟配额；TLS/DTLS 仍评估）。
 - 外挂以太网（W5500 / DM9051 类 SPI 模块）驱动与真机验证。
 - CPU1 tick 抢占默认开（完成专项真机稳定性后）。
 - Linux/macOS 原生构建与测试（当前固定工具链是 Windows x64）。

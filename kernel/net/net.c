@@ -70,6 +70,9 @@ static uint8_t g_tx_frame[NET_FRAME_MAX] __attribute__((aligned(16)));
 static uint8_t g_rx_frame[NET_FRAME_MAX] __attribute__((aligned(16)));
 
 static pot_task_t g_net_task_tcb;
+/* MCP 请求在 net 任务上下文内联执行；mcp.c 已把 tools/call 的转义缓冲
+ * 改为流式输出，2.5KB 栈可容纳 JSON 分发 + fs.write + HMAC。维持原大小，
+ * 避免挤占堆（m4 门禁要求 total>=64KB 且可分配 64KB 大块）。 */
 static uint32_t g_net_stack[640];
 
 /* ---- 协作式可重入锁（单核；tick ISR 不触碰网络路径） ---- */
