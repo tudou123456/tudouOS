@@ -215,6 +215,7 @@ def run(args):
 
     cycle = 0
     last_tick = None
+    prev_wd = None
     used_hist = []
     try:
         while time.monotonic() < deadline:
@@ -239,17 +240,19 @@ def run(args):
                         failures.append({"cycle": cycle, "kind": "tick-stall",
                                          "detail": f"tick {last_tick}->{h['t']}"})
                 last_tick = h["t"]
-                if h["irq"]["wd"] != 0:
-                    # QEMU 的 genex+CCOMPARE 模型会丢 tick，内核用看门狗补账；
-                    # 这是已知模型缺陷，不判内核失败。真机必须为 0。
+                wd = h["irq"]["wd"]
+                if prev_wd is not None and wd > prev_wd:
                     if args.platform == "hw":
+                        # 真机每次增量都是一次 int6 丢 tick 补偿；累计值本身
+                        # 不是持续故障，按“新增事件”记 failure 便于长跑审计。
                         failures.append({"cycle": cycle, "kind": "watchdog",
-                                         "detail": f"wd={h['irq']['wd']}"})
+                                         "detail": f"wd {prev_wd}->{wd}"})
                     elif "qemu-wd" not in warned:
                         warned.add("qemu-wd")
                         warnings.append({"cycle": cycle, "kind": "qemu-watchdog",
-                                         "detail": f"wd={h['irq']['wd']} "
+                                         "detail": f"wd={wd} "
                                                    "(QEMU 模型丢 tick，已补账)"})
+                prev_wd = wd
                 if h["irq"]["lag"] > 1000:
                     if args.platform == "hw":
                         failures.append({"cycle": cycle, "kind": "sched-lag",
