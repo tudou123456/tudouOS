@@ -25,7 +25,9 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+# 保留调用时的 ASCII 联接路径（不要把 D:\tudouOS 解析回含中文的真实路径），
+# 否则 QEMU/工具链子进程会落到非 ASCII 路径上。
+ROOT = Path(__file__).absolute().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
