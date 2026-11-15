@@ -258,14 +258,17 @@ def run(args):
                         warned.add("qemu-lag")
                         warnings.append({"cycle": cycle, "kind": "qemu-lag",
                                          "detail": f"lag={h['irq']['lag']}ms"})
-                if h["irq"]["jitmax"] > 5000:
-                    if args.platform == "hw":
+                if args.platform == "hw":
+                    # 真机既有 m2 上限是 120000us（启动瞬态基线可达 45ms）；
+                    # 5ms 是 QEMU/稳态尺度，不能拿来硬判真机。
+                    if h["irq"]["jitmax"] > args.jit_max_us:
                         failures.append({"cycle": cycle, "kind": "tick-jitter",
-                                         "detail": f"jitmax={h['irq']['jitmax']}us"})
-                    elif "qemu-jitter" not in warned:
-                        warned.add("qemu-jitter")
-                        warnings.append({"cycle": cycle, "kind": "qemu-jitter",
-                                         "detail": f"jitmax={h['irq']['jitmax']}us"})
+                                         "detail": f"jitmax={h['irq']['jitmax']}us "
+                                                   f"> {args.jit_max_us}us"})
+                elif h["irq"]["jitmax"] > 5000 and "qemu-jitter" not in warned:
+                    warned.add("qemu-jitter")
+                    warnings.append({"cycle": cycle, "kind": "qemu-jitter",
+                                     "detail": f"jitmax={h['irq']['jitmax']}us"})
                 if h["heap"]["fault"] != 0 or h["heap"]["fail"] != 0:
                     failures.append({"cycle": cycle, "kind": "heap-error",
                                      "detail": f"fault={h['heap']['fault']} "
@@ -369,6 +372,8 @@ def main():
     ap.add_argument("--smp", action="store_true", help="启动 CPU1 并每轮发 IPI")
     ap.add_argument("--leak-bytes", type=int, default=8192,
                     help="连续 5 个样本相对基线的堆增长阈值（默认 8192）")
+    ap.add_argument("--jit-max-us", type=int, default=120000,
+                    help="真机 tick 最大抖动硬阈值（默认 120000us，对齐 m2）")
     ap.add_argument("--max-failures", type=int, default=5)
     args = ap.parse_args()
     if args.minutes <= 0 or args.interval <= 0:
