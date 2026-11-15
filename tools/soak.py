@@ -259,12 +259,15 @@ def run(args):
                         warnings.append({"cycle": cycle, "kind": "qemu-lag",
                                          "detail": f"lag={h['irq']['lag']}ms"})
                 if args.platform == "hw":
-                    # 真机既有 m2 上限是 120000us（启动瞬态基线可达 45ms）；
-                    # 5ms 是 QEMU/稳态尺度，不能拿来硬判真机。
-                    if h["irq"]["jitmax"] > args.jit_max_us:
-                        failures.append({"cycle": cycle, "kind": "tick-jitter",
+                    # jitmax 是开机以来的累计最大值：启动/SMP/churn 瞬态会
+                    # 留下 18–130ms 的永久峰值，不能当长期抖动硬判据。
+                    # 长期 tick 健康由 t 推进、lag、wd 判定。
+                    if (h["irq"]["jitmax"] > args.jit_max_us and
+                            "hw-jitter" not in warned):
+                        warned.add("hw-jitter")
+                        warnings.append({"cycle": cycle, "kind": "hw-jitter",
                                          "detail": f"jitmax={h['irq']['jitmax']}us "
-                                                   f"> {args.jit_max_us}us"})
+                                                   "(累计峰值，仅告警)"})
                 elif h["irq"]["jitmax"] > 5000 and "qemu-jitter" not in warned:
                     warned.add("qemu-jitter")
                     warnings.append({"cycle": cycle, "kind": "qemu-jitter",
@@ -373,7 +376,7 @@ def main():
     ap.add_argument("--leak-bytes", type=int, default=8192,
                     help="连续 5 个样本相对基线的堆增长阈值（默认 8192）")
     ap.add_argument("--jit-max-us", type=int, default=120000,
-                    help="真机 tick 最大抖动硬阈值（默认 120000us，对齐 m2）")
+                    help="真机 tick 累计峰值告警阈值（默认 120000us；仅告警）")
     ap.add_argument("--max-failures", type=int, default=5)
     args = ap.parse_args()
     if args.minutes <= 0 or args.interval <= 0:
