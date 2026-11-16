@@ -4,6 +4,7 @@
 #include "io.h"
 #include "intc.h"
 #include "smp.h"
+#include "task.h"
 #include "tick.h"
 #include "wdt.h"
 #include "time.h"
@@ -92,9 +93,13 @@ static inline void set_ccompare0(uint32_t v)
 #define SYST_UNIT0_OP  (0x60023000u + 0x04u) /* bit30 UPDATE, bit29 VALID */
 #define SYST_UNIT0_LO  (0x60023000u + 0x44u)
 
-/* 标定窗口：400k ccount（80MHz 下 5ms ≈ 80k 个 systimer tick，
- * 量化粒度 1/16 MHz，误差 <0.1%）。 */
-#define CAL_CC 400000u
+/* 标定窗口：每窗 1M ccount（20MHz 下 ~50ms / 80MHz 下 ~12.5ms）。
+ *
+ * 为什么用双窗口斜率：systimer 的“锁存→读”有约 1ms 的固定开销，单窗口
+ * 短标定会把它算进 dsys——400k 窗口实测把 20MHz 误标成 19MHz（5.26%
+ * 偏快）。两个等长窗口相减（d2-d1）可抵消这个固定开销，只剩
+ * “第二个 1M ccount 内的 16MHz tick 数”，用于求 cpu_hz。 */
+#define CAL_CC 1000000u
 
 static uint32_t syst_unit0_lo(void)
 {
@@ -108,21 +113,32 @@ static uint32_t calibrate_cpu_hz(void)
 {
     mmio_write(SYST_CONF, (1u << 31) | (1u << 30));
     (void)syst_unit0_lo(); /* 预热一次锁存读，排除首次读时序差异 */
-    uint32_t lo0 = syst_unit0_lo();
+
     uint32_t c0 = ccount();
+    uint32_t s0 = syst_unit0_lo();
     while ((ccount() - c0) < CAL_CC) {
     }
-    uint32_t dsys = syst_unit0_lo() - lo0; /* CAL_CC 个 ccount 内的 16MHz tick 数 */
-    if (dsys == 0u) {
+    uint32_t c1 = ccount();
+    uint32_t s1 = syst_unit0_lo();
+    while ((ccount() - c1) < CAL_CC) {
+    }
+    uint32_t c2 = ccount();
+    uint32_t s2 = syst_unit0_lo();
+
+    uint32_t d1 = s1 - s0;
+    uint32_t d2 = s2 - s0;
+    uint32_t dcc = c2 - c1;       /* 第二窗 ccount 数（≈CAL_CC） */
+    uint32_t dsys = d2 - d1;      /* 第二窗 systimer tick 数（固定读开销抵消） */
+    if (dcc == 0u || dsys == 0u) {
         return 80000000u; /* systimer 无计数（读法偏差/时钟未启）：
                              回退 ROM 引导常见默认 80MHz，保命不死机 */
     }
 
-    /* cpu_hz = CAL_CC * 16MHz / dsys。直接乘 16e6 会溢出 u32，
+    /* cpu_hz = dcc * 16MHz / dsys。直接乘 16e6 会溢出 u32，
      * 改为以 1/16 MHz 为粒度合成：q*16 + (r*16)/dsys 再 ×1e6。
      * u32 除法由 S3 硬件 quou 完成（无 libgcc 依赖，D-30 实证）。 */
-    uint32_t q = CAL_CC / dsys;
-    uint32_t r = CAL_CC % dsys;
+    uint32_t q = dcc / dsys;
+    uint32_t r = dcc % dsys;
     return (q * 16u + (r * 16u) / dsys) * 1000000u;
 }
 
@@ -154,6 +170,32 @@ void time_source_init(void)
 #endif
 #if !POT_TIME_TIMG
     g_boot_cc = ccount();
+#endif
+}
+
+/* 真机时基诊断：用 1s 窗口直接测 systimer 计数 / ccount 计数。
+ * 期望：systimer 16MHz 平均值，若 ccount=20MHz 则 syst_per_cc_ppm=800000；
+ * 若读到的比值明显偏离，说明标定窗口或时钟假设有问题。 */
+void time_clock_diag(void)
+{
+#if TUDOU_PLATFORM != 0
+    uint32_t s0 = syst_unit0_lo();
+    uint32_t c0 = ccount();
+    pot_task_sleep(1000u);
+    uint32_t s1 = syst_unit0_lo();
+    uint32_t c1 = ccount();
+    uint32_t ds = s1 - s0;
+    uint32_t dc = c1 - c0;
+    /* 避免 64 位除法（内核不链 libgcc）：ds/dc 约 0.8，先用 dc/1000
+     * 降尺度再做 32 位除法，得到千分比（误差 <0.01%）。 */
+    uint32_t ratio_x1000 = (dc >= 1000u) ? (ds / (dc / 1000u)) : 0u;
+    potato_printf("[POTATO][CLK] dsys=%u dcc=%u syst_per_cc_x1000=%u "
+                  "cpu_hz=%u tick_cc=%u\r\n",
+                  (unsigned)ds, (unsigned)dc, (unsigned)ratio_x1000,
+                  (unsigned)g_cpu_hz, (unsigned)g_tick_cc);
+#else
+    potato_printf("[POTATO][CLK] qemu fixed cpu=%uHz tick_cc=%u\r\n",
+                  (unsigned)POT_CPU_HZ, (unsigned)(POT_CPU_HZ / TICK_HZ));
 #endif
 }
 

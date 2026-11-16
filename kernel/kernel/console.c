@@ -160,13 +160,14 @@ static void cmd_help(void)
 {
     uart_puts("commands: help, ping, echo <text>, info, tickstat, trace [n], "
               "tasks, taskdemo <mode>, sleep <ms>, msgdemo <mode> [n], "
-              "msgstat, memstat, memtest <mode> [n], pal, drivers, "
+              "msgstat, memstat, memtest <mode> [n], pal, clockdiag, drivers, "
               "fs <sub>, mcp on|off, flood <n>, crash, looptest [n]\r\n"
               "  fs: ls|write <n> <t>|cat <n>|rm <n>|mkfs|df\r\n"
               "  trace: [n]|jsonl [n]|imp [n]|stream on|off|pump|meta|health\r\n"
               "  health, obs [panic], inject <leak|hang|spin|off> [arg]\r\n"
               "  net [arp|link down|up|ip <a.b.c.d> [gw]], ping <a.b.c.d>\r\n"
-              "  netmcp [dump|test|port <p>|peer <a.b.c.d> <port>|rw on|off]\r\n"
+              "  netmcp [dump|test|port <p>|peer <a.b.c.d> <port>|rw on|off|"
+              "key <64hex>|clear|quota <n>]\r\n"
               "  smp [stat|start|ipi <n>|spawn <cpu|any> <n>|work|preempt on|off|"
               "selftest]  (M9 双核)\r\n"
               "  MCP: lines starting with '{' are JSON-RPC\r\n");
@@ -1172,6 +1173,10 @@ static void cmd_dispatch(char *line)
     }
     if (strcmp(line, "pal") == 0) {
         cmd_pal();
+        return;
+    }
+    if (strcmp(line, "clockdiag") == 0) {
+        time_clock_diag();
         return;
     }
     if (strcmp(line, "drivers") == 0) {

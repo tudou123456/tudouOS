@@ -19,13 +19,19 @@
 
 ### Changed
 
-- net 任务栈 640 words（2.5KB）→ 2048 words（8KB）：MCP 工具执行
-  （如 `fs.write`）+ JSON 分发 + HMAC 叠加后原栈会击穿。
+- net 任务栈保持 640 words（2.5KB）：MCP `send_*` 改为流式输出 id/转义
+  body 并加 `noinline`，降低 tools/call 栈占用；避免扩栈挤占 m4 门禁的
+  64KB 堆。
 
 ### Fixed
 
 - 远程 `tools/call` 响应在 net 栈不足时无输出（表现为请求已执行但
-  对端超时）；栈扩容后响应稳定。
+  对端超时）；流式输出 + noinline 后响应稳定，栈维持 2.5KB。
+- **真机时基标定偏快 5.266%**：400k ccount 短窗口把 systimer 锁存/读
+  的约 1ms 固定开销算进 `dsys`，把实际 20MHz 标成 19MHz，导致
+  tick/`now_us` 快 5.266%（≈20/19）。改为双窗口（每窗 1M ccount）
+  斜率标定，抵消固定读开销；新增 `clockdiag` 诊断命令。修复后 10s
+  墙钟 ratio 0.99975，`cpu_hz=20000000`。
 
 ## [0.8.0] - 2026-10-19 · Technical Preview
 

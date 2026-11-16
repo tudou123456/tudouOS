@@ -17,6 +17,7 @@
 #define POT_TIME_TIMG 0
 
 void time_source_init(void);
+void time_clock_diag(void);   /* 真机：1s 窗口 systimer/ccount 比值诊断 */
 uint32_t time_now_us(void);
 uint32_t time_ticks_raw(void);
 

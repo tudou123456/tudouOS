@@ -251,3 +251,18 @@ stack=0x3fcc5d90-0x3fcc9d90 heap=0x3fcc9d90-0x3fcdc700`。
 - 结论：**M1–M9 控制面全部在真机跑通**。剩余真机缺口仅两项已知限制：以太网需
   外挂 SPI 模块（W5500/DM9051，未实现/未到货）、CPU1 tick 抢占（默认关、未验证）；
   另 K3（trace 环覆盖）为设计观察、K1/K2 已修复并真机验证，不阻塞功能验收。
+
+### 9. 2026-11-16 8h soak 发现：真机时基快 5.266%（已修）
+
+- 8h soak（SMP + churn）用宿主墙钟对比：真机 tick **14,779.6s / 墙钟
+  14,040.2s = 1.05266**；QEMU 同方法 ratio 1.00000，排除宿主计时问题。
+- 1s 长窗口 `clockdiag`：`systimer/ccount = 0.800`（16MHz / 20MHz），
+  确认 ccount 实际约 20MHz、SYSTIMER 为 16MHz 平均值。
+- 根因：`calibrate_cpu_hz()` 的 400k ccount 短窗口把 SYSTIMER
+  “锁存→读”的固定开销（约 1ms）算进 `dsys`，20MHz 被标成 19MHz；
+  `tick_period=19000cc`（应 20000cc），tick 与 `now_us` 同源偏快 5.266%。
+- 修复：双窗口（每窗 1M ccount）斜率标定，`d2-d1` 抵消固定读开销；
+  新增 `clockdiag` 控制台命令。修复后 10s 墙钟 ratio **0.99975**、
+  `cpu_hz=20000000`，`hw_runner --smoke` 9/9。
+- 同次 8h 还记录 **12 次 `wd`**（int6 丢 tick 补偿），其中一次
+  `jitmax≈719ms`；修复后已启动新的 8h soak 复核该路径。
