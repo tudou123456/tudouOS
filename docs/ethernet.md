@@ -260,7 +260,7 @@ net_task_step():
   * 槽仍有效 → 直接重放缓存响应（`dup`、`replay` 计数），**不重复执行**；
   * 槽已被 ack 回收 → 无法重放，回 `resync`（`resync` 计数 +1）告知对端
     「游标过期，按当前纪元重来」，**不重复执行**。
-* **响应重放槽 8 项**：每条响应原文存槽（`seq`、`epoch`、`body`）；未确认时
+* **响应重放槽 6 项**：每条响应原文存槽（`seq`、`epoch`、`body`）；未确认时
   `netmcp_udp_tick()` 每 400ms 重发（`replay retry`），重连时立即重发
   （`replay relink`）；收到 ack 后 `slot_drop_upto(ack)` 回收。
 * 游标 `g_peer_seq` = 已处理的对端请求序号；`seq > cursor+1` 的缺口计入 `gaps`

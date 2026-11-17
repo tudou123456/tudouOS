@@ -42,7 +42,9 @@
 #define NETMCP_HELLO_MS  500u    /* hello 重试周期 */
 #define NETMCP_REPLAY_MS 400u    /* 未确认响应的重发周期 */
 #define NETMCP_SEEN      8u      /* 请求去重窗口 */
-#define NETMCP_SLOTS     8u      /* 响应重放槽（也是已发未确认窗口） */
+#define NETMCP_SLOTS     6u      /* 响应重放槽（已发未确认窗口）：8→6，
+                                  * 为 UART TX ring 腾 2.4KB BSS；请求去重
+                                  * 仍保留 8（NETMCP_SEEN） */
 #define NETMCP_BODY_MAX  1200u   /* 单条 MCP 行上限（含转义前） */
 #define NETMCP_DGRAM_MAX 1400u   /* 单报文体上限 */
 #define NETMCP_KEY_LEN   32u     /* HMAC-SHA256 共享密钥长度 */

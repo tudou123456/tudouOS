@@ -63,7 +63,7 @@ UART0 同时是**人类控制台**（`potato>` 提示符）。不加区分时，
 | --- | --- |
 | 响应配对 | host 以 `resp.seq >= req.seq` 且 `resp.ack == req.seq` 配对（设备可能因丢 ack 而重放旧响应，host 按序丢弃） |
 | 请求去重 | 设备保留最近 8 个对端请求 seq（`NETMCP_SEEN`）；同 seq 重发只重放缓存响应、**不重复执行** |
-| 响应重放 | 设备缓存最近 8 个已发响应（`NETMCP_SLOTS`），未收到 host ack 时每 400ms 重放 |
+| 响应重放 | 设备缓存最近 6 个已发响应（`NETMCP_SLOTS`），未收到 host ack 时每 400ms 重放 |
 | ack 累积回收 | host 每收到响应回 `type:"ack"` 帧（body 空，ack=已处理的设备 seq），设备据此回收重放槽 |
 | epoch | 设备每个启动周期 epoch=1；host 从 hello/resp 学习并跟随。设备收到 epoch 更旧的帧会回 `resync`，host 跟随新 epoch 重发 |
 | hello | 设备未学对端前每 500ms 发 hello（body 带 MAC）；host 收到后回 ack，设备学到对端即停止广播 |

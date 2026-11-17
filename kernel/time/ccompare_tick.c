@@ -372,5 +372,9 @@ void tick_irq_handler(void)
         }
     }
     tick_note_gap(delta_us);
+
+    /* TX ring 泵送：只在 tick ISR（单消费者）里做，避免 poll/ISR 双消费者
+     * 竞争 tail；每次最多填 64B，115200 下 1ms 只需 ~12B。 */
+    uart_tx_pump();
 }
 

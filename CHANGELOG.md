@@ -22,6 +22,11 @@
 - net 任务栈保持 640 words（2.5KB）：MCP `send_*` 改为流式输出 id/转义
   body 并加 `noinline`，降低 tools/call 栈占用；避免扩栈挤占 m4 门禁的
   64KB 堆。
+- **UART TX 改为 2KB ring + 1kHz tick 泵送**：`potato_printf` 只入队，
+  不再持 `rsil15` 忙等 TX FIFO；长控制台行（health/tasks 1KB+）不再
+  屏蔽 tick。ring 满（flood/trace dump）才回退同步 drain。
+- `netmcp` 响应重放槽 8→6（请求去重窗口仍 8），为 TX ring 腾 BSS；
+  m4 64KB 堆门禁保持通过。
 
 ### Fixed
 
@@ -32,6 +37,11 @@
   tick/`now_us` 快 5.266%（≈20/19）。改为双窗口（每窗 1M ccount）
   斜率标定，抵消固定读开销；新增 `clockdiag` 诊断命令。修复后 10s
   墙钟 ratio 0.99975，`cpu_hz=20000000`。
+- **控制台长输出导致 tick 丢失/wd**：`potato_printf` 持打印锁
+  （`rsil 15`）期间 `uart_putc` 按 FIFO 忙等，115200 下 health 一行
+  ~1.2KB 会屏蔽中断 100ms 级；soak 的 health/tasks 采样因此自扰动。
+  TX ring 后 health 仍占 84ms 串口时间，但 `jitmax` 从 ~72ms 降到
+  ~5.5ms。
 
 ## [0.8.0] - 2026-10-19 · Technical Preview
 

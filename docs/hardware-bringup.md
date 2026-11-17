@@ -266,3 +266,19 @@ stack=0x3fcc5d90-0x3fcc9d90 heap=0x3fcc9d90-0x3fcdc700`。
   `cpu_hz=20000000`，`hw_runner --smoke` 9/9。
 - 同次 8h 还记录 **12 次 `wd`**（int6 丢 tick 补偿），其中一次
   `jitmax≈719ms`；修复后已启动新的 8h soak 复核该路径。
+
+### 10. 2026-11-17 隔离与 TX ring：长控制台输出阻塞 tick（已修）
+
+- A(churn)/B(smp)/C(idle) 各 2h：wd **3/6/0**，三组 `jitmax` 均在
+  **108–120ms**；`health` JSON 一行 1.2–1.35KB，115200 下传输正好
+  104–117ms。
+- 单次实测：启动后 `jitmax=17.4ms`；发一条 `health`（816 字符，76ms）
+  后跳到 **72.6ms**；`tickstat` 短行 15ms。证明是输出本身在关中断。
+- 根因：`potato_printf` 持 `g_printf_lock`（`pot_lock_acquire` 内
+  `rsil 15`）期间逐字符 `uart_putc`，TX FIFO 满时忙等；整行输出期间
+  tick 中断被屏蔽，soak 的 `health`/`tasks` 采样因此**自扰动**。
+- 修复：UART TX 改为 **2KB ring + 1kHz tick 泵送**；`uart_putc` 只入队，
+  ring 满才回退同步 drain；raw 帧也走 ring 但不进抽头，保证顺序。
+  `netmcp` 响应重放槽 8→6 腾 BSS，m4 64KB 门禁仍过。
+- 验证：`health` 仍占 84ms 串口时间，但 `jitmax` 降到 **5.5ms**；
+  `hw_runner --smoke` 9/9、m4 全量 9/9；2h SMP+churn 复核进行中。

@@ -12,8 +12,10 @@
  *     CLKDIV  +0x14  STATUS +0x1C（RXFIFO_CNT=[9:0]，TXFIFO_CNT=[25:16]）
  *     CONF1   +0x24（RXFIFO_FULL_THRHD=[9:0]）
  *   波特率/引脚不做重配：ROM 引导时已把 UART0 配成 115200-8N1。
- * TX 保持轮询（M2 无调度器，轮询最简单可靠）；RX 由 rxfifo_full 中断
- * （阈值 1 字节）搬入环形缓冲，控制台从缓冲取数 —— 事件驱动打样。
+ * TX：2KB 环形缓冲 + 1kHz tick ISR 泵送；potato_printf 只入队，长行
+ * 不再以 rsil15 忙等 FIFO（2026-11-17 TX-ring 修复）。ring 满才同步
+ * drain（flood/trace dump 这类超长输出）。RX 由 rxfifo_full 中断（阈值
+ * 1 字节）搬入环形缓冲，控制台从缓冲取数。
  */
 
 #define UART0_BASE   0x60000000u
@@ -38,6 +40,15 @@ static volatile uint16_t g_rx_tail;
 static volatile uint32_t g_rx_irq_count;
 static volatile uint32_t g_rx_bytes;
 static volatile int g_tx_midline; /* D-03：TX 行组装中标记 */
+
+/* TX 环形缓冲：长度 2 的幂。potato_printf 只入队，tick ISR 泵送；
+ * 这样长行（health/tasks 1KB+）不再以 rsil15 阻塞等 FIFO，tick 不丢。
+ * 只有 ring 满（flood/trace dump）才回退到同步 drain。 */
+#define TX_RING_LEN 2048u
+static volatile char g_tx_ring[TX_RING_LEN];
+static volatile uint16_t g_tx_head;
+static volatile uint16_t g_tx_tail;
+static volatile uint32_t g_tx_overflow;
 
 void uart_init(void)
 {
@@ -85,6 +96,41 @@ void uart_set_sink(void (*fn)(char))
     g_uart_sink = fn;
 }
 
+/* ring 满时的同步回退：按旧路径等 FIFO 空再写。只会在 flood/trace dump
+ * 这类超长输出上发生；普通 health/tasks 行完全走异步泵送。 */
+static void uart_tx_drain_blocking(void)
+{
+    g_tx_overflow++;
+    while (g_tx_tail != g_tx_head) {
+        while (ST_TXFIFO_CNT(mmio_read(UART_STATUS)) != 0u) {
+        }
+        mmio_write(UART_FIFO, (uint32_t)(uint8_t)g_tx_ring[g_tx_tail]);
+        g_tx_tail = (uint16_t)((g_tx_tail + 1u) & (TX_RING_LEN - 1u));
+    }
+}
+
+static void uart_enqueue(char c)
+{
+    g_tx_midline = (c == '\n') ? 0 : 1;
+    uint16_t next = (uint16_t)((g_tx_head + 1u) & (TX_RING_LEN - 1u));
+    if (next == g_tx_tail) {
+        uart_tx_drain_blocking();
+        next = (uint16_t)((g_tx_head + 1u) & (TX_RING_LEN - 1u));
+    }
+    g_tx_ring[g_tx_head] = c;
+    g_tx_head = next;
+}
+
+/* tick ISR 调用：把 ring 里的字节尽量填进 TX FIFO，不等待。 */
+void uart_tx_pump(void)
+{
+    while (g_tx_tail != g_tx_head &&
+           ST_TXFIFO_CNT(mmio_read(UART_STATUS)) < 64u) {
+        mmio_write(UART_FIFO, (uint32_t)(uint8_t)g_tx_ring[g_tx_tail]);
+        g_tx_tail = (uint16_t)((g_tx_tail + 1u) & (TX_RING_LEN - 1u));
+    }
+}
+
 void uart_putc(char c)
 {
     if (c == '\n') {
@@ -93,17 +139,7 @@ void uart_putc(char c)
     if (g_uart_sink != 0) {
         g_uart_sink(c);
     }
-    /* 等 TX FIFO 排空再写，对 FIFO 深度不敏感 */
-    while (ST_TXFIFO_CNT(mmio_read(UART_STATUS)) != 0u) {
-    }
-    mmio_write(UART_FIFO, (uint32_t)(uint8_t)c);
-    /* D-03：行组装标记——自上一个换行起有字节发出且尚未收行。
-     * 调度器据此把 tick 抢占推迟到行边界，保住逐行输出锚点。 */
-    if (c == '\n') {
-        g_tx_midline = 0;
-    } else {
-        g_tx_midline = 1;
-    }
+    uart_enqueue(c);
 }
 
 int uart_tx_midline(void)
@@ -132,14 +168,8 @@ static void uart_putc_raw(char c)
     if (c == '\n') {
         uart_putc_raw('\r');
     }
-    while (ST_TXFIFO_CNT(mmio_read(UART_STATUS)) != 0u) {
-    }
-    mmio_write(UART_FIFO, (uint32_t)(uint8_t)c);
-    if (c == '\n') {
-        g_tx_midline = 0;
-    } else {
-        g_tx_midline = 1;
-    }
+    /* 与普通输出共用 TX ring（保证顺序），只是不进抽头。 */
+    uart_enqueue(c);
 }
 
 void uart_puts_raw(const char *s)
