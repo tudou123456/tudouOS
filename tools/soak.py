@@ -253,7 +253,7 @@ def run(args):
                                          "detail": f"wd={wd} "
                                                    "(QEMU 模型丢 tick，已补账)"})
                 prev_wd = wd
-                if h["irq"]["lag"] > 1000:
+                if 1000 < h["irq"]["lag"] < 0x80000000:
                     if args.platform == "hw":
                         failures.append({"cycle": cycle, "kind": "sched-lag",
                                          "detail": f"lag={h['irq']['lag']}ms"})

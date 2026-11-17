@@ -234,8 +234,13 @@ void pot_obs_health(void)
     pot_sb_kv_u32(&b, "jitmax", time_tick_jitter_max_us(), 1);
     pot_sb_kv_u32(&b, "wd", time_tick_watchdog_count(), 1);
     /* 调度时钟漂移 = tick 计数 - 调度器时钟。正常应恒为 0/个位数；
-       持续增长说明 tick 补账未驱动调度器（sleep 到点不唤醒）。 */
-    pot_sb_kv_u32(&b, "lag", time_tick_count() - pot_sched_now(), 1);
+       持续增长说明 tick 补账未驱动调度器（sleep 到点不唤醒）。
+       两次读取跨 tick 时可能出现 -1/-2 的瞬时负差，取绝对值上报，
+       避免 u32 下溢成 4294967294。 */
+    int32_t lag_s = (int32_t)(time_tick_count() - pot_sched_now());
+    uint32_t lag = (lag_s < 0) ? (uint32_t)(-(lag_s + 1)) + 1u
+                               : (uint32_t)lag_s;
+    pot_sb_kv_u32(&b, "lag", lag, 1);
     pot_sb_ch(&b, '}');
 
     pot_sb_str(&b, ",\"tasks\":[");

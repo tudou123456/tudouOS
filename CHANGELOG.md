@@ -37,6 +37,11 @@
   tick/`now_us` 快 5.266%（≈20/19）。改为双窗口（每窗 1M ccount）
   斜率标定，抵消固定读开销；新增 `clockdiag` 诊断命令。修复后 10s
   墙钟 ratio 0.99975，`cpu_hz=20000000`。
+- 双窗口标定仍可能因中断插入 `ccount→systimer` 读而偶发退回 19MHz；
+  测量期间 `irq_save/irq_restore` 后，3 次重启均稳定 20MHz、10s
+  墙钟 ratio 1.000019。
+- `health` 的 `lag` 在跨 tick 读取时会出现 -1/-2 的瞬时负差，改取
+  绝对值上报，避免 u32 下溢显示 4294967294ms；soak 侧同步加 guard。
 - **控制台长输出导致 tick 丢失/wd**：`potato_printf` 持打印锁
   （`rsil 15`）期间 `uart_putc` 按 FIFO 忙等，115200 下 health 一行
   ~1.2KB 会屏蔽中断 100ms 级；soak 的 health/tasks 采样因此自扰动。

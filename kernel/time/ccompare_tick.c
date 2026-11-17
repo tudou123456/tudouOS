@@ -112,6 +112,11 @@ static uint32_t syst_unit0_lo(void)
 static uint32_t calibrate_cpu_hz(void)
 {
     mmio_write(SYST_CONF, (1u << 31) | (1u << 30));
+
+    /* 测量期间关中断：ccount→systimer 的“锁存→读”若被中断插入，
+     * 两次窗口的固定读延迟不再相等，斜率会退化成 19MHz（实测同一固件
+     * 不同 boot 会在 19/20MHz 间跳）。~100ms 关中断仅发生在启动早期。 */
+    uint32_t ps = irq_save();
     (void)syst_unit0_lo(); /* 预热一次锁存读，排除首次读时序差异 */
 
     uint32_t c0 = ccount();
@@ -130,6 +135,7 @@ static uint32_t calibrate_cpu_hz(void)
     uint32_t dcc = c2 - c1;       /* 第二窗 ccount 数（≈CAL_CC） */
     uint32_t dsys = d2 - d1;      /* 第二窗 systimer tick 数（固定读开销抵消） */
     if (dcc == 0u || dsys == 0u) {
+        irq_restore(ps);
         return 80000000u; /* systimer 无计数（读法偏差/时钟未启）：
                              回退 ROM 引导常见默认 80MHz，保命不死机 */
     }
@@ -139,7 +145,9 @@ static uint32_t calibrate_cpu_hz(void)
      * u32 除法由 S3 硬件 quou 完成（无 libgcc 依赖，D-30 实证）。 */
     uint32_t q = dcc / dsys;
     uint32_t r = dcc % dsys;
-    return (q * 16u + (r * 16u) / dsys) * 1000000u;
+    uint32_t hz = (q * 16u + (r * 16u) / dsys) * 1000000u;
+    irq_restore(ps);
+    return hz;
 }
 
 static uint32_t g_cc_per_us_v; /* 标定后 = g_cpu_hz / 1e6（≥16） */
