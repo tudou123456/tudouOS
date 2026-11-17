@@ -19,7 +19,8 @@
 ## v0.9 — 长稳与网络
 
 - 48h soak、10⁷ 次上下文切换、SMP 跨核 heap/fs/msg 长稳压测
-  （框架 `tools/soak.py` 已就绪，长跑待执行）。
+  （QEMU 48h **2880 轮 PASS**；真机 8h **480 轮**，时基 ratio 1.000034，
+  仍有 5 次 wd / 一次 691ms 停摆待查；框架 `tools/soak.py`）。
 - UDP 远程 MCP 的 HMAC/token 鉴权与写配额（基础版已落地：
   HMAC-SHA256 + 分钟配额；TLS/DTLS 仍评估）。
 - 外挂以太网（W5500 / DM9051 类 SPI 模块）驱动与真机验证。

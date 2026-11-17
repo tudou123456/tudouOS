@@ -281,4 +281,13 @@ stack=0x3fcc5d90-0x3fcc9d90 heap=0x3fcc9d90-0x3fcdc700`。
   ring 满才回退同步 drain；raw 帧也走 ring 但不进抽头，保证顺序。
   `netmcp` 响应重放槽 8→6 腾 BSS，m4 64KB 门禁仍过。
 - 验证：`health` 仍占 84ms 串口时间，但 `jitmax` 降到 **5.5ms**；
-  `hw_runner --smoke` 9/9、m4 全量 9/9；2h SMP+churn 复核进行中。
+  `hw_runner --smoke` 9/9、m4 全量 9/9。
+- 标定稳定性：双窗口测量仍可能被中断插入 `ccount→systimer` 读，
+  偶发退回 19MHz；测量全程 `irq_save/irq_restore` 后，3 次重启均
+  **20MHz**、10s 墙钟 ratio 1.000019。
+- 最终 8h（`soak-hw-8h-final`）：**480/480**，ratio **1.000034**，
+  `wd=5`（cycles 10/21/33/222/357），cycle 33 一次 `jitmax=691ms`；
+  heap 264–2400B、tasks 6、lag 0。TX ring 把 wd 从 21 降到 5；
+  残余 691ms 停摆与 console 输出无关，指向锁/中断延迟，待查。
+- QEMU 48h：**2880/2880 PASS**，无 failures；heap 0–2032B、
+  tasks 5/7、lag 0；`wd` 仅为 QEMU 模型累计警告。
