@@ -42,6 +42,9 @@
   ~1.2KB 会屏蔽中断 100ms 级；soak 的 health/tasks 采样因此自扰动。
   TX ring 后 health 仍占 84ms 串口时间，但 `jitmax` 从 ~72ms 降到
   ~5.5ms。
+- 异常/panic 收尾在 `halt_forever()` 前调用 `uart_tx_flush()`，同步
+  发完 TX ring；否则 CPU 停机后 tick 泵不再运行，异常现场会留在
+  ring 里（CI `test_exception_dump` 捕获）。
 
 ## [0.8.0] - 2026-10-19 · Technical Preview
 

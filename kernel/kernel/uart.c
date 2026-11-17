@@ -98,15 +98,26 @@ void uart_set_sink(void (*fn)(char))
 
 /* ring 满时的同步回退：按旧路径等 FIFO 空再写。只会在 flood/trace dump
  * 这类超长输出上发生；普通 health/tasks 行完全走异步泵送。 */
-static void uart_tx_drain_blocking(void)
+static void uart_tx_drain(void)
 {
-    g_tx_overflow++;
     while (g_tx_tail != g_tx_head) {
         while (ST_TXFIFO_CNT(mmio_read(UART_STATUS)) != 0u) {
         }
         mmio_write(UART_FIFO, (uint32_t)(uint8_t)g_tx_ring[g_tx_tail]);
         g_tx_tail = (uint16_t)((g_tx_tail + 1u) & (TX_RING_LEN - 1u));
     }
+}
+
+static void uart_tx_drain_blocking(void)
+{
+    g_tx_overflow++;
+    uart_tx_drain();
+}
+
+/* 异常/panic 收尾：CPU 即将 halt，tick ISR 不再泵送，必须同步把 ring 发完。 */
+void uart_tx_flush(void)
+{
+    uart_tx_drain();
 }
 
 static void uart_enqueue(char c)

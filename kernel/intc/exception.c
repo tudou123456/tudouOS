@@ -8,6 +8,7 @@
 #include "tick.h"
 #include "time.h"
 #include "trace.h"
+#include "uart.h"
 
 /*
  * 异常处理（M3）：
@@ -163,6 +164,7 @@ unsigned exception_dispatch(unsigned vec_flag, void *frame_base)
                   time_tick_count(), trace_dropped());
     potato_printf("[POTATO][EXC] HALTED (QMP system_reset 可复位重启)\r\n");
 
+    uart_tx_flush(); /* CPU 即将 halt，tick 泵不再运行：同步发完现场 */
     halt_forever();
     return 0;
 }
@@ -172,5 +174,6 @@ void intc_unexpected_vector(unsigned vector_offset)
     potato_printf("\r\n[POTATO][EXC] unexpected vector offset=0x%x "
                   "(call0 kernel shouldn't hit this)\r\n", vector_offset);
     potato_printf("[POTATO][EXC] HALTED\r\n");
+    uart_tx_flush();
     halt_forever();
 }
